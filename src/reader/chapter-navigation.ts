@@ -22,7 +22,7 @@ export function buildReaderChapterUrl(chapterUid: string): string {
   return url.href;
 }
 
-export function resolveCurrentReaderChapterUid(): string {
+export function resolveCurrentReaderChapterUid(_items: TocItem[] = state.readerTocItems): string {
   return getCurrentReaderChapterUid();
 }
 
