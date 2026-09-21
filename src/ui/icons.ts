@@ -1,4 +1,4 @@
-export type IconName = 'home'|'shelf'|'search'|'catalog'|'note'|'recent'|'rank'|'menu'|'share'|'dots'|'chevron'|'eye'|'edit'|'bell'|'plus';
+export type IconName = 'home'|'shelf'|'search'|'catalog'|'note'|'recent'|'rank'|'menu'|'share'|'dots'|'chevron'|'eye'|'edit'|'bell'|'plus'|'lock';
 
 export function icon(name: IconName, size = 18): string {
   const attrs = `width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"`;
@@ -18,6 +18,7 @@ export function icon(name: IconName, size = 18): string {
     edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/>',
     bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"/><path d="M10 19h4"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
+    lock: '<rect x="6.5" y="10" width="11" height="9" rx="2"/><path d="M9 10V7.5a3 3 0 0 1 6 0V10"/>',
   };
   return `<svg ${attrs}>${paths[name]}</svg>`;
 }
