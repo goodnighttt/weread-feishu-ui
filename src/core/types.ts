@@ -30,6 +30,10 @@ export interface TocItem {
   rawIndent?: number;
   node?: Element | null;
   active?: boolean;
+  locked?: boolean;
+  price?: number;
+  paid?: number;
+  lockSource?: 'official' | 'native';
 }
 
 export interface CanvasRecord {
