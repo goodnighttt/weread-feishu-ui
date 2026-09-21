@@ -14,6 +14,8 @@ import { STORAGE, writeBoolean, writeJson } from '../core/storage';
 import type { TocItem } from '../core/types';
 import { resolveCurrentReaderChapterUid } from './chapter-navigation';
 
+const TOC_LOG = '[wr-feishu-ui][toc]';
+
 function isTocVolumeTitle(title = ''): boolean {
   return /^(第[一二三四五六七八九十百千万零〇0-9]+[卷部篇辑册编]|卷[一二三四五六七八九十百千万零〇0-9]+|part\s*[ivx0-9]+)/i.test(cleanText(title));
 }
@@ -48,6 +50,21 @@ function getNativeTocRawIndent(node: Element): number {
   } catch {
     return 0;
   }
+}
+
+function isNativeTocLocked(node: Element): boolean {
+  const row = node.closest('li,[class*="chapter"],[class*="item"]') || node;
+  if (row.matches('[disabled],[aria-disabled="true"],[data-locked="1"],[data-lock="1"]')) return true;
+  if (row.querySelector('[class*="lock"],[class*="Lock"],[aria-label*="锁"],[title*="锁"]')) return true;
+
+  const classText = [row, ...Array.from(row.querySelectorAll('[class]')).slice(0, 24)]
+    .map((item) => item.getAttribute('class') || '')
+    .join(' ')
+    .toLowerCase();
+  if (/(^|[\s_-])locked?([\s_-]|$)/.test(classText)) return true;
+
+  const hint = cleanText(`${row.getAttribute('aria-label') || ''} ${row.getAttribute('title') || ''}`);
+  return /锁定|未购买|需购买|付费章节/.test(hint);
 }
 
 export function normalizeTocLevels(items: TocItem[]): TocItem[] {
@@ -88,7 +105,11 @@ export function normalizeTocLevels(items: TocItem[]): TocItem[] {
 
 export function collectNativeTocItems(): TocItem[] {
   const panel = getNativeTocPanel();
-  if (!panel) return [];
+  if (!panel) {
+    console.info(`${TOC_LOG} native catalog panel not found`);
+    return [];
+  }
+
   const candidates = [...panel.querySelectorAll('a, button, [role="button"], [class*="item"], [class*="chapter"]')];
   const seen = new Set<string>();
   const items: TocItem[] = [];
@@ -100,6 +121,7 @@ export function collectNativeTocItems(): TocItem[] {
     seen.add(key);
     const dataLevel = [node.getAttribute('data-level'), node.getAttribute('data-depth'), node.getAttribute('data-indent')]
       .map(Number).find(Number.isFinite);
+    const locked = isNativeTocLocked(node);
     items.push({
       title,
       href: getActionHref(node),
@@ -107,9 +129,18 @@ export function collectNativeTocItems(): TocItem[] {
       level: Number.isFinite(dataLevel) ? Number(dataLevel) : 0,
       rawIndent: getNativeTocRawIndent(node),
       node,
+      locked,
+      lockSource: locked ? 'native' : undefined,
     });
     if (items.length >= 300) break;
   }
+
+  console.info(`${TOC_LOG} native catalog collected`, {
+    count: items.length,
+    locked: items.filter((item) => item.locked).length,
+    withUid: items.filter((item) => item.chapterUid).length,
+    withHref: items.filter((item) => item.href).length,
+  });
   return normalizeTocLevels(items);
 }
 
@@ -117,8 +148,16 @@ export async function fetchOfficialReaderToc(): Promise<TocItem[]> {
   if (state.readerOfficialToc.length) return state.readerOfficialToc;
   if (state.readerOfficialTocPromise) return state.readerOfficialTocPromise;
   const bookId = getReaderBookId();
-  if (!bookId) return [];
+  if (!bookId) {
+    console.warn(`${TOC_LOG} cannot request chapterInfos: bookId not found`, {
+      href: location.href,
+      bookHash: getReaderBookHash(),
+      meta: getReaderMeta(),
+    });
+    return [];
+  }
 
+  console.info(`${TOC_LOG} requesting chapterInfos`, { bookId });
   state.readerOfficialTocPromise = fetch('/web/book/chapterInfos', {
     method: 'POST',
     credentials: 'include',
@@ -137,19 +176,38 @@ export async function fetchOfficialReaderToc(): Promise<TocItem[]> {
         ? chapters.map((chapter: any) => {
             const rawLevel = [chapter?.level, chapter?.depth, chapter?.indent, chapter?.chapterLevel, chapter?.hierarchy]
               .map(Number).find(Number.isFinite);
+            const price = Number(chapter?.price ?? 0);
+            const paid = Number(chapter?.paid ?? 0);
+            const locked = Number.isFinite(price) && price > 0 && paid !== 1;
             return {
               title: cleanText(chapter?.title || ''),
               chapterUid: String(chapter?.chapterUid ?? ''),
               chapterIdx: Number(chapter?.chapterIdx ?? -1),
               level: Number.isFinite(rawLevel) ? Number(rawLevel) : 0,
+              price: Number.isFinite(price) ? price : 0,
+              paid: Number.isFinite(paid) ? paid : 0,
+              locked,
+              lockSource: locked ? 'official' : undefined,
             } satisfies TocItem;
           }).filter((chapter: TocItem) => chapter.title && chapter.chapterUid)
         : [];
       state.readerOfficialToc = normalizeTocLevels(items);
+      console.info(`${TOC_LOG} chapterInfos ready`, {
+        bookId,
+        count: state.readerOfficialToc.length,
+        locked: state.readerOfficialToc.filter((item) => item.locked).length,
+        first: state.readerOfficialToc.slice(0, 3).map((item) => ({
+          title: item.title,
+          chapterUid: item.chapterUid,
+          price: item.price,
+          paid: item.paid,
+          locked: item.locked,
+        })),
+      });
       return state.readerOfficialToc;
     })
     .catch((error) => {
-      console.warn('[wr-feishu-ui] chapter catalog fetch failed', error);
+      console.warn(`${TOC_LOG} chapterInfos failed`, error);
       return [];
     })
     .finally(() => {
@@ -164,7 +222,17 @@ export function mergeTocLevelsFromOfficial(items: TocItem[], official: TocItem[]
   const byTitle = new Map(official.map((item) => [canonicalBookTitle(item.title), item]));
   return normalizeTocLevels(items.map((item) => {
     const match = byUid.get(String(item.chapterUid || '')) || byTitle.get(canonicalBookTitle(item.title));
-    return match ? { ...item, level: match.level, chapterUid: item.chapterUid || match.chapterUid } : item;
+    if (!match) return item;
+    return {
+      ...item,
+      level: match.level,
+      chapterUid: item.chapterUid || match.chapterUid,
+      chapterIdx: item.chapterIdx ?? match.chapterIdx,
+      price: match.price,
+      paid: match.paid,
+      locked: Boolean(item.locked || match.locked),
+      lockSource: item.locked ? item.lockSource : match.lockSource,
+    };
   }));
 }
 
@@ -264,6 +332,7 @@ export async function primeReaderToc(onUpdated?: () => void): Promise<void> {
   if (official.length) {
     state.readerTocItems = official;
     ensureActiveTocAncestorsExpanded(state.readerTocItems);
+    console.info(`${TOC_LOG} using official catalog`, { count: official.length });
     onUpdated?.();
     scrollReaderTocToActive();
     return;
@@ -273,6 +342,7 @@ export async function primeReaderToc(onUpdated?: () => void): Promise<void> {
   if (existing.length) {
     state.readerTocItems = existing;
     ensureActiveTocAncestorsExpanded(state.readerTocItems);
+    console.info(`${TOC_LOG} using native catalog already in DOM`, { count: existing.length });
     onUpdated?.();
     const enriched = await fetchOfficialReaderToc();
     if (enriched.length) state.readerTocItems = mergeTocLevelsFromOfficial(state.readerTocItems, enriched);
@@ -281,13 +351,16 @@ export async function primeReaderToc(onUpdated?: () => void): Promise<void> {
     return;
   }
 
-  if (!clickNative('catalog')) return;
-  await new Promise((resolve) => window.setTimeout(resolve, 180));
+  const opened = clickNative('catalog');
+  console.info(`${TOC_LOG} opening native catalog for discovery`, { opened });
+  if (!opened) return;
+  await new Promise((resolve) => window.setTimeout(resolve, 220));
   const items = collectNativeTocItems();
   clickNative('catalog');
   if (items.length) {
     state.readerTocItems = items;
     ensureActiveTocAncestorsExpanded(items);
+    console.info(`${TOC_LOG} using native catalog after opening`, { count: items.length });
     onUpdated?.();
     scrollReaderTocToActive();
   }
