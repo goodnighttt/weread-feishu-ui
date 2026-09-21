@@ -4,20 +4,70 @@ import {
   getCurrentReaderChapterUid,
   getNativeTocPanel,
   getReaderBookHash,
-  getReaderBookId,
   getReaderMeta,
 } from '../adapter/weread';
+import { pageWindow } from '../core/page-window';
 import { state } from '../core/state';
 import type { TocItem } from '../core/types';
 
 const NAV_LOG = '[微信读书·飞书UI][目录跳转]';
 
-let publicCatalogBookId = '';
-let publicCatalogCache: TocItem[] = [];
-let publicCatalogPromise: Promise<TocItem[]> | null = null;
+let catalogCacheKey = '';
+let catalogCache: TocItem[] = [];
+let catalogSelectedBookId = '';
+let catalogPromise: Promise<TocItem[]> | null = null;
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function normalizeBookIdCandidate(value: unknown): string {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const match = text.match(/(?:bookId[=/:])?([A-Za-z0-9_]+)\/?$/);
+  return match?.[1] || '';
+}
+
+function collectReaderBookIdCandidates(): string[] {
+  const ids: string[] = [];
+  const push = (value: unknown) => {
+    const id = normalizeBookIdCandidate(value);
+    if (id && !ids.includes(id)) ids.push(id);
+  };
+
+  // 匿名阅读页上，LD+JSON 的 @Id 通常比运行时 state 里的 bookId 更适合目录接口。
+  for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+    try {
+      const parsed = JSON.parse(script.textContent || '{}');
+      const values = Array.isArray(parsed) ? parsed : [parsed];
+      for (const value of values) {
+        push(value?.bookId);
+        push(value?.['@Id']);
+        push(value?.['@id']);
+      }
+    } catch { /* 忽略无效 JSON */ }
+  }
+
+  try {
+    const reader = (pageWindow as any).__INITIAL_STATE__?.reader;
+    push(reader?.bookInfo?.bookId);
+    push(reader?.bookId);
+  } catch { /* 忽略 */ }
+
+  // 最后再从内联脚本中补充候选，避免页面结构变化时完全拿不到 ID。
+  for (const script of document.scripts) {
+    const text = script.textContent || '';
+    const patterns = [
+      /["']bookId["']\s*:\s*["']([^"']+)["']/g,
+      /["']@Id["']\s*:\s*["']([^"']+)["']/g,
+    ];
+    for (const pattern of patterns) {
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(text)) != null && ids.length < 8) push(match[1]);
+    }
+    if (ids.length >= 8) break;
+  }
+  return ids;
 }
 
 function nativeRowTitle(row: Element): string {
@@ -32,11 +82,8 @@ function nativeRowTitle(row: Element): string {
 function getNativeCatalogRows(): Element[] {
   const panel = getNativeTocPanel();
   if (!panel) return [];
-
   const exact = [...panel.querySelectorAll('.readerCatalog_list > .readerCatalog_list_item')];
-  if (exact.length) return exact;
-
-  return [...panel.querySelectorAll('.readerCatalog_list_item')];
+  return exact.length ? exact : [...panel.querySelectorAll('.readerCatalog_list_item')];
 }
 
 function findNativeCatalogRow(index: number, title: string): Element | null {
@@ -66,8 +113,6 @@ function isNativeCatalogOpen(): boolean {
 }
 
 function clickNativeCatalogRow(row: Element): boolean {
-  // 微信读书当前目录的点击区域在 item 内部；从标题文字节点发出 click，
-  // 事件会向上冒泡到 Vue/React 绑定的目录项处理器。直接点外层 div 可能没有任何效果。
   const target = row.querySelector<HTMLElement>('.readerCatalog_list_item_title_text')
     || row.querySelector<HTMLElement>('.readerCatalog_list_item_inner')
     || (row instanceof HTMLElement ? row : null);
@@ -91,96 +136,102 @@ async function waitForNativeNavigation(args: {
   while (Date.now() - started < 1200) {
     await wait(80);
     if (location.href !== args.beforeHref) return true;
-
     const currentUid = getCurrentReaderChapterUid();
     if (args.targetUid && currentUid === args.targetUid) return true;
     if (currentUid && currentUid !== args.beforeUid) return true;
-
     const currentChapter = getReaderMeta().chapter;
-    if (
-      currentChapter
-      && canonicalBookTitle(currentChapter) !== canonicalBookTitle(args.beforeChapter)
-    ) return true;
-
+    if (currentChapter && canonicalBookTitle(currentChapter) !== canonicalBookTitle(args.beforeChapter)) return true;
     if (args.row.classList.contains('readerCatalog_list_item_selected')) return true;
   }
   return false;
 }
 
-function extractPublicChapters(payload: any): TocItem[] {
-  const candidates = [
-    payload?.data?.[0]?.updated,
-    payload?.data?.[0]?.chapters,
-    payload?.data?.updated,
-    payload?.data?.chapters,
-    payload?.updated,
-    payload?.chapters,
-  ];
-  const chapters = candidates.find(Array.isArray) || [];
-
-  return chapters
-    .map((chapter: any) => {
-      const title = String(chapter?.title || '').replace(/\s+/g, ' ').trim();
-      const chapterUid = String(chapter?.chapterUid ?? '').trim();
-      const price = Number(chapter?.price ?? 0);
-      const paid = Number(chapter?.paid ?? 0);
-      const rawLevel = Number(chapter?.level ?? 0);
-      return {
-        title,
-        chapterUid,
-        chapterIdx: Number(chapter?.chapterIdx ?? -1),
-        level: Number.isFinite(rawLevel) ? rawLevel : 0,
-        price: Number.isFinite(price) ? price : 0,
-        paid: Number.isFinite(paid) ? paid : 0,
-        locked: Number.isFinite(price) && price > 0 && paid !== 1,
-        lockSource: 'official' as const,
-      } satisfies TocItem;
-    })
-    .filter((item: TocItem) => item.title && item.chapterUid);
+function chaptersFromRecord(record: any): TocItem[] {
+  const chapters = Array.isArray(record?.updated)
+    ? record.updated
+    : (Array.isArray(record?.chapters) ? record.chapters : []);
+  return chapters.map((chapter: any) => {
+    const title = String(chapter?.title || '').replace(/\s+/g, ' ').trim();
+    const chapterUid = String(chapter?.chapterUid ?? '').trim();
+    const price = Number(chapter?.price ?? 0);
+    const paid = Number(chapter?.paid ?? 0);
+    const rawLevel = Number(chapter?.level ?? 0);
+    return {
+      title,
+      chapterUid,
+      chapterIdx: Number(chapter?.chapterIdx ?? -1),
+      level: Number.isFinite(rawLevel) ? rawLevel : 0,
+      price: Number.isFinite(price) ? price : 0,
+      paid: Number.isFinite(paid) ? paid : 0,
+    } satisfies TocItem;
+  }).filter((item: TocItem) => item.title && item.chapterUid);
 }
 
-async function fetchPublicCatalog(): Promise<TocItem[]> {
-  const bookId = getReaderBookId();
-  if (!bookId) return [];
-  if (publicCatalogBookId === bookId && publicCatalogCache.length) return publicCatalogCache;
-  if (publicCatalogBookId === bookId && publicCatalogPromise) return publicCatalogPromise;
+function chooseCatalogRecord(payload: any): { items: TocItem[]; bookId: string } {
+  const records = Array.isArray(payload?.data)
+    ? payload.data
+    : (payload?.data ? [payload.data] : [payload]);
+  const wantedBook = canonicalBookTitle(getReaderMeta().book);
+  const usable = records.map((record: any) => ({
+    record,
+    items: chaptersFromRecord(record),
+    title: canonicalBookTitle(record?.book?.title || record?.title || ''),
+  })).filter((entry) => entry.items.length > 0);
+  if (!usable.length) return { items: [], bookId: '' };
+  const matched = usable.find((entry) => entry.title && wantedBook && entry.title === wantedBook) || usable[0];
+  return {
+    items: matched.items,
+    bookId: normalizeBookIdCandidate(matched.record?.bookId || matched.record?.book?.bookId),
+  };
+}
 
-  publicCatalogBookId = bookId;
-  publicCatalogPromise = fetch('/web/book/publicchapterInfos', {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json;charset=UTF-8' },
-    body: JSON.stringify({ bookIds: [String(bookId)] }),
-  })
-    .then((response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
-    })
-    .then((payload) => {
-      publicCatalogCache = extractPublicChapters(payload);
-      return publicCatalogCache;
-    })
-    .catch(() => {
-      publicCatalogCache = [];
-      return [];
-    })
-    .finally(() => {
-      publicCatalogPromise = null;
+async function requestCatalog(endpoint: string, bookIds: string[]): Promise<{ items: TocItem[]; bookId: string }> {
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json;charset=UTF-8' },
+      body: JSON.stringify({ bookIds }),
     });
+    if (!response.ok) return { items: [], bookId: '' };
+    return chooseCatalogRecord(await response.json());
+  } catch {
+    return { items: [], bookId: '' };
+  }
+}
 
-  return publicCatalogPromise;
+async function fetchFallbackCatalog(): Promise<TocItem[]> {
+  const ids = collectReaderBookIdCandidates();
+  const key = ids.join('|');
+  if (!ids.length) return [];
+  if (catalogCacheKey === key && catalogCache.length) return catalogCache;
+  if (catalogCacheKey === key && catalogPromise) return catalogPromise;
+
+  catalogCacheKey = key;
+  catalogPromise = (async () => {
+    // 未登录优先公开目录；登录态或个别书公开目录为空时再回退普通目录。
+    let result = await requestCatalog('/web/book/publicchapterInfos', ids);
+    if (!result.items.length) result = await requestCatalog('/web/book/chapterInfos', ids);
+    catalogCache = result.items;
+    catalogSelectedBookId = result.bookId;
+    return catalogCache;
+  })().finally(() => {
+    catalogPromise = null;
+  });
+  return catalogPromise;
 }
 
 function findCatalogItem(items: TocItem[], index: number, title: string): TocItem | null {
   const wanted = canonicalBookTitle(title);
+  const byTitle = items.find((item) => canonicalBookTitle(item.title) === wanted);
+  if (byTitle) return byTitle;
   const indexed = Number.isInteger(index) ? items[index] : undefined;
-  if (indexed && (!wanted || canonicalBookTitle(indexed.title) === wanted)) return indexed;
-  return items.find((item) => canonicalBookTitle(item.title) === wanted) || null;
+  return indexed || null;
 }
 
-function enrichStateFromPublicCatalog(publicItems: TocItem[]): void {
-  if (!publicItems.length || !state.readerTocItems.length) return;
-  const byTitle = new Map(publicItems.map((item) => [canonicalBookTitle(item.title), item]));
+function enrichStateFromCatalog(items: TocItem[]): void {
+  if (!items.length || !state.readerTocItems.length) return;
+  const byTitle = new Map(items.map((item) => [canonicalBookTitle(item.title), item]));
   state.readerTocItems = state.readerTocItems.map((item) => {
     const match = byTitle.get(canonicalBookTitle(item.title));
     if (!match) return item;
@@ -190,9 +241,6 @@ function enrichStateFromPublicCatalog(publicItems: TocItem[]): void {
       chapterIdx: item.chapterIdx ?? match.chapterIdx,
       price: item.price ?? match.price,
       paid: item.paid ?? match.paid,
-      // 原生目录已经能准确反映当前账号是否可读，不用公开接口覆盖它。
-      locked: item.locked ?? match.locked,
-      lockSource: item.lockSource || match.lockSource,
     };
   });
 }
@@ -210,10 +258,7 @@ export function resolveCurrentReaderChapterUid(_items: TocItem[] = state.readerT
   return getCurrentReaderChapterUid();
 }
 
-function outputNavigationLog(
-  level: 'info' | 'warn' | 'error',
-  data: Record<string, unknown>,
-): void {
+function outputNavigationLog(level: 'info' | 'warn' | 'error', data: Record<string, unknown>): void {
   const message = `${NAV_LOG} ${String(data['结果'] || '完成')}`;
   if (level === 'error') console.error(message, data);
   else if (level === 'warn') console.warn(message, data);
@@ -227,15 +272,14 @@ export async function navigateToReaderTocItem(index: number, title: string): Pro
   const beforeHref = location.href;
   const beforeUid = getCurrentReaderChapterUid();
   const beforeChapter = getReaderMeta().chapter;
+  const bookIdCandidates = collectReaderBookIdCandidates();
   const trace: Record<string, unknown> = {
     '章节': wantedTitle,
     '目录序号': index,
-    '当前地址': beforeHref,
     '当前章节': beforeChapter,
-    '书籍ID': getReaderBookId(),
+    '书籍ID候选': bookIdCandidates.length ? bookIdCandidates : '未取得',
     '书籍哈希': getReaderBookHash(),
     '初始章节UID': targetUid || '未取得',
-    '原生目录已打开': isNativeCatalogOpen(),
   };
 
   if (!saved) {
@@ -243,12 +287,9 @@ export async function navigateToReaderTocItem(index: number, title: string): Pro
     outputNavigationLog('error', trace);
     return false;
   }
-
   if (saved.locked) {
     trace['结果'] = '已阻止：该章节当前处于锁定状态';
-    trace['锁定来源'] = saved.lockSource || '未知';
-    trace['价格'] = saved.price;
-    trace['已购买'] = saved.paid;
+    trace['锁定来源'] = saved.lockSource || '原生目录';
     outputNavigationLog('warn', trace);
     return false;
   }
@@ -261,52 +302,32 @@ export async function navigateToReaderTocItem(index: number, title: string): Pro
 
   const nativeRow = findNativeCatalogRow(index, wantedTitle);
   trace['原生目录项'] = nativeRow ? '已找到' : '未找到';
-  if (nativeRow) {
-    trace['原生目录标题'] = nativeRowTitle(nativeRow);
-    trace['原生目录锁定'] = isNativeRowLocked(nativeRow);
-
-    if (!isNativeRowLocked(nativeRow)) {
-      const clicked = clickNativeCatalogRow(nativeRow);
-      trace['原生点击'] = clicked ? '已触发' : '触发失败';
-      if (clicked) {
-        const navigated = await waitForNativeNavigation({
-          beforeHref,
-          beforeUid,
-          beforeChapter,
-          row: nativeRow,
-          targetUid,
-        });
-        if (navigated) {
-          trace['结果'] = '成功：通过微信读书原生目录跳转';
-          trace['跳转后地址'] = location.href;
-          trace['跳转后章节'] = getReaderMeta().chapter;
-          outputNavigationLog('info', trace);
-          return true;
-        }
-      }
+  if (nativeRow && !isNativeRowLocked(nativeRow)) {
+    const clicked = clickNativeCatalogRow(nativeRow);
+    trace['原生点击'] = clicked ? '已触发' : '触发失败';
+    if (clicked && await waitForNativeNavigation({ beforeHref, beforeUid, beforeChapter, row: nativeRow, targetUid })) {
+      trace['结果'] = '成功：通过微信读书原生目录跳转';
+      trace['跳转后章节'] = getReaderMeta().chapter;
+      outputNavigationLog('info', trace);
+      return true;
     }
   }
 
-  // 原生 DOM 不暴露 chapterUid；匿名网页则可能让 /chapterInfos 返回空数组。
-  // 因此在这里使用微信读书公开目录接口补齐 UID，再走官方支持的 progressChapterUid 链接。
-  let catalogSource = '现有目录数据';
   let matched = findCatalogItem(state.readerOfficialToc, index, wantedTitle);
   if (matched?.chapterUid) targetUid = String(matched.chapterUid);
 
   if (!targetUid) {
-    const publicItems = await fetchPublicCatalog();
-    trace['公开目录章节数'] = publicItems.length;
-    matched = findCatalogItem(publicItems, index, wantedTitle);
+    const fallbackItems = await fetchFallbackCatalog();
+    trace['接口目录章节数'] = fallbackItems.length;
+    trace['接口命中的书籍ID'] = catalogSelectedBookId || '未命中';
+    matched = findCatalogItem(fallbackItems, index, wantedTitle);
     if (matched?.chapterUid) {
       targetUid = String(matched.chapterUid);
-      catalogSource = '公开目录接口';
-      enrichStateFromPublicCatalog(publicItems);
+      enrichStateFromCatalog(fallbackItems);
     }
   }
 
-  trace['章节UID来源'] = catalogSource;
   trace['最终章节UID'] = targetUid || '未取得';
-
   if (targetUid) {
     const url = buildReaderChapterUrl(targetUid);
     if (url) {
@@ -318,7 +339,7 @@ export async function navigateToReaderTocItem(index: number, title: string): Pro
     }
   }
 
-  trace['结果'] = '失败：没有取得可用的章节UID，原生目录点击也未生效';
+  trace['结果'] = '失败：目录接口与原生目录都没有提供可用的章节跳转信息';
   outputNavigationLog('error', trace);
   return false;
 }
