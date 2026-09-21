@@ -26,13 +26,15 @@ function outlineHtml(
     const hasChildren = hasTocChildren(items, index);
     const key = tocItemStableKey(item, index);
     const isCollapsed = hasChildren && collapsed.has(key);
+    const locked = Boolean(item.locked);
     if (!hiddenByAncestor) {
       const fold = hasChildren
         ? `<button class="wrf-outline-fold ${isCollapsed ? 'collapsed' : ''}" data-action="toc-fold" data-toc-index="${index}" aria-label="${isCollapsed ? '展开' : '收起'} ${escapeHtml(item.title)}">${icon('chevron', 13)}</button>`
         : `<span class="wrf-outline-fold placeholder">${icon('chevron', 13)}</span>`;
+      const itemTitle = locked ? `${item.title}（已锁定）` : item.title;
       rows.push(`
-        <div class="wrf-outline-row ${index === activeIndex ? 'active' : ''}" data-toc-index="${index}" data-level="${level}" style="--wrf-toc-level:${level}">
-          ${fold}<button class="wrf-outline-item" data-action="toc-item" data-toc-index="${index}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</button>
+        <div class="wrf-outline-row ${index === activeIndex ? 'active' : ''} ${locked ? 'locked' : ''}" data-toc-index="${index}" data-level="${level}" style="--wrf-toc-level:${level}">
+          ${fold}<button class="wrf-outline-item" data-action="toc-item" data-toc-index="${index}" title="${escapeHtml(itemTitle)}" ${locked ? 'disabled aria-disabled="true"' : ''}>${escapeHtml(item.title)}</button>${locked ? `<span class="wrf-outline-lock" title="该章节在微信读书中处于锁定状态">${icon('lock', 13)}</span>` : ''}
         </div>`);
     }
     if (isCollapsed) collapsedAncestors.push({ level, index });
