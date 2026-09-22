@@ -5,6 +5,7 @@ import { state } from './core/state';
 import { STORAGE, writeBoolean } from './core/storage';
 import { clearCanvasCapture } from './reader/canvas-capture';
 import { navigateToReaderTocItem, clearNativeTocHitTargets, syncNativeTocHitTargets } from './reader/chapter-navigation';
+import { bindReaderProgressiveLoad } from './reader/progressive-load';
 import {
   getReaderTocStorageKey,
   primeReaderToc,
@@ -52,9 +53,8 @@ async function shareCurrentPage(): Promise<void> {
 
 function afterRender(version: string): void {
   if (!state.root || state.page !== 'reader' || !state.enabled) return;
-  // 暂停“飞书正文滚动 -> 原生页面 window.scrollTo”同步。
-  // 微信读书会根据原生滚动位置虚拟化/分页正文，这会让正文 DOM 在刷新时短暂消失，
-  // 从而造成 DOM 坐标提取与 Canvas 兜底来回切换。目录自身的滚动定位仍然保留。
+  const readerMain = state.root.querySelector('[data-reader-main]');
+  if (readerMain instanceof HTMLElement) bindReaderProgressiveLoad(readerMain);
   if (state.readerTocOpen) scrollReaderTocToActive();
   void version;
 }
