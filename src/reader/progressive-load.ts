@@ -4,6 +4,7 @@ const LOAD_LOG = '[微信读书·飞书UI][正文续载]';
 const BOTTOM_THRESHOLD = 240;
 const RETRY_DELAY = 600;
 const DEMAND_WINDOW = 6000;
+const MIN_USEFUL_RANGE = 120;
 
 let lastReaderUrl = '';
 let loggedReaderUrl = '';
@@ -11,11 +12,13 @@ let pendingFrame = 0;
 let retryTimer = 0;
 let demandUntil = 0;
 let markedScroller: HTMLElement | null = null;
+let cachedScroller: NativeScroller | null = null;
 
 type NativeScroller = {
   element: HTMLElement;
   isDocument: boolean;
   label: string;
+  candidates: string[];
 };
 
 function resetForReaderUrl(): void {
@@ -23,6 +26,7 @@ function resetForReaderUrl(): void {
   lastReaderUrl = location.href;
   loggedReaderUrl = '';
   demandUntil = 0;
+  cachedScroller = null;
   window.clearTimeout(retryTimer);
   retryTimer = 0;
 }
@@ -36,33 +40,101 @@ function describeElement(element: HTMLElement): string {
   if (element === document.body) return 'body / 页面滚动';
   const id = element.id ? `#${element.id}` : '';
   const className = typeof element.className === 'string'
-    ? element.className.trim().split(/\s+/).filter(Boolean).slice(0, 3).map((name) => `.${name}`).join('')
+    ? element.className.trim().split(/\s+/).filter(Boolean).slice(0, 4).map((name) => `.${name}`).join('')
     : '';
   return `${element.tagName.toLowerCase()}${id}${className}`;
 }
 
-function findNativeScroller(): NativeScroller {
-  const scrollingElement = (document.scrollingElement || document.documentElement) as HTMLElement;
-  const content = document.querySelector<HTMLElement>('.readerChapterContent')
-    || document.querySelector<HTMLElement>('.readerContent');
+function elementRange(element: HTMLElement): number {
+  if (element === document.documentElement || element === document.body) {
+    return Math.max(0, element.scrollHeight - window.innerHeight);
+  }
+  return Math.max(0, element.scrollHeight - element.clientHeight);
+}
 
-  let current = content;
-  while (current && current !== document.body && current !== document.documentElement) {
-    const style = getComputedStyle(current);
-    const overflowY = style.overflowY || style.overflow;
-    const canScroll = /auto|scroll|overlay/i.test(overflowY)
-      && current.scrollHeight > current.clientHeight + 8;
-    if (canScroll) {
-      return { element: current, isDocument: false, label: describeElement(current) };
-    }
+function canProgrammaticallyScroll(element: HTMLElement): boolean {
+  const max = elementRange(element);
+  if (max <= 8) return false;
+  if (element === document.documentElement || element === document.body) return true;
+
+  const original = element.scrollTop;
+  const target = original < max ? Math.min(max, original + 1) : Math.max(0, original - 1);
+  if (target === original) return false;
+
+  try {
+    element.scrollTop = target;
+    const changed = Math.abs(element.scrollTop - original) > 0;
+    element.scrollTop = original;
+    return changed;
+  } catch {
+    return false;
+  }
+}
+
+function isIgnoredNativeArea(element: HTMLElement): boolean {
+  return Boolean(element.closest('.readerCatalog, .readerNotePanel, .readerControls'));
+}
+
+function collectNativeScrollerCandidates(): Array<{ element: HTMLElement; range: number }> {
+  const candidates = new Map<HTMLElement, number>();
+  const add = (element: HTMLElement | null) => {
+    if (!element || isIgnoredNativeArea(element)) return;
+    const range = elementRange(element);
+    if (range <= 8) return;
+    const previous = candidates.get(element) || 0;
+    if (range > previous) candidates.set(element, range);
+  };
+
+  const chapter = document.querySelector<HTMLElement>('.readerChapterContent');
+  const readerContent = document.querySelector<HTMLElement>('.readerContent');
+
+  // 1) 正文自身与所有祖先。旧版只看 overflow:auto/scroll，容易漏掉 JS 可滚动但 CSS 隐藏滚动条的容器。
+  let current: HTMLElement | null = chapter || readerContent;
+  while (current) {
+    add(current);
+    if (current === document.body || current === document.documentElement) break;
     current = current.parentElement;
   }
 
-  return {
-    element: scrollingElement,
-    isDocument: true,
-    label: describeElement(scrollingElement),
+  // 2) 微信读书常见的阅读器容器。
+  for (const selector of ['.reader_main', '.readerContent', '.readerChapterContent_container', '.app_content', '#routerView']) {
+    document.querySelectorAll<HTMLElement>(selector).forEach(add);
+  }
+
+  // 3) 如果常见容器仍没有明显滚动范围，再扫描 readerContent 内的块级候选。
+  if (![...candidates.values()].some((range) => range >= MIN_USEFUL_RANGE) && readerContent) {
+    readerContent.querySelectorAll<HTMLElement>('div,main,section,article').forEach((element) => {
+      if (element.clientHeight < 80) return;
+      add(element);
+    });
+  }
+
+  const scrollingElement = (document.scrollingElement || document.documentElement) as HTMLElement;
+  add(scrollingElement);
+  if (document.body) add(document.body);
+
+  return [...candidates.entries()]
+    .map(([element, range]) => ({ element, range }))
+    .filter(({ element }) => canProgrammaticallyScroll(element))
+    .sort((a, b) => b.range - a.range);
+}
+
+function findNativeScroller(): NativeScroller {
+  if (cachedScroller?.element.isConnected && elementRange(cachedScroller.element) > 8) return cachedScroller;
+
+  const candidates = collectNativeScrollerCandidates();
+  const useful = candidates.find(({ range }) => range >= MIN_USEFUL_RANGE) || candidates[0];
+  const fallback = (document.scrollingElement || document.documentElement) as HTMLElement;
+  const element = useful?.element || fallback;
+  const isDocument = element === document.documentElement || element === document.body || element === document.scrollingElement;
+
+  cachedScroller = {
+    element,
+    isDocument,
+    label: describeElement(element),
+    candidates: candidates.slice(0, 6).map(({ element: item, range }) => `${describeElement(item)}：${range}px`),
   };
+  return cachedScroller;
 }
 
 function markNativeScroller(scroller: NativeScroller): void {
@@ -107,13 +179,15 @@ function syncNativeProgress(main: HTMLElement): void {
   const scroller = findNativeScroller();
   markNativeScroller(scroller);
   const metrics = getNativeMetrics(scroller);
-  if (metrics.max <= 0) {
-    scheduleRetry(main);
-    return;
-  }
 
-  const target = progress >= 0.995 ? metrics.max : Math.round(metrics.max * progress);
-  if (Math.abs(target - metrics.top) > 2) setNativeScroll(scroller, target);
+  // 虚拟阅读器可能在滚动后替换真正的滚动节点；当前节点范围异常小时重新探测。
+  if (metrics.max < MIN_USEFUL_RANGE) {
+    cachedScroller = null;
+    scheduleRetry(main);
+  } else {
+    const target = progress >= 0.995 ? metrics.max : Math.round(metrics.max * progress);
+    if (Math.abs(target - metrics.top) > 2) setNativeScroll(scroller, target);
+  }
 
   if (loggedReaderUrl !== lastReaderUrl) {
     loggedReaderUrl = lastReaderUrl;
@@ -121,6 +195,7 @@ function syncNativeProgress(main: HTMLElement): void {
       '原生滚动容器': scroller.label,
       '飞书进度': `${Math.round(progress * 100)}%`,
       '原生滚动范围': `${metrics.max}px`,
+      '候选滚动容器': scroller.candidates,
       '底部自动重试': `${DEMAND_WINDOW / 1000}秒`,
     });
   }
@@ -142,6 +217,7 @@ function scheduleRetry(main: HTMLElement): void {
   if (Date.now() >= demandUntil || !main.isConnected || !isNearBottom(main)) return;
   retryTimer = window.setTimeout(() => {
     retryTimer = 0;
+    cachedScroller = null;
     scheduleSync(main);
   }, RETRY_DELAY);
 }
@@ -161,7 +237,6 @@ export function bindReaderProgressiveLoad(main: HTMLElement): void {
     requestSync(main, isNearBottom(main));
   }, { passive: true });
 
-  // 到底后 scrollTop 不再变化；继续向下滚轮时，把原生阅读器再次同步到“新的底部”。
   main.addEventListener('wheel', (event) => {
     if (event.deltaY > 0) requestSync(main, true);
   }, { passive: true });
@@ -170,6 +245,5 @@ export function bindReaderProgressiveLoad(main: HTMLElement): void {
     requestSync(main, true);
   }, { passive: true });
 
-  // 初次绑定也同步一次，避免飞书与原生阅读进度从一开始就错位。
   scheduleSync(main);
 }
