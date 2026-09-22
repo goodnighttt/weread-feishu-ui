@@ -1,5 +1,6 @@
 import { getReaderMeta } from '../adapter/weread';
 import { state } from '../core/state';
+import { syncNativeTocHitTargets, clearNativeTocHitTargets } from '../reader/chapter-navigation';
 import { getReaderBlocks, readerBlocksHtml } from '../reader/content';
 import {
   ensureActiveTocAncestorsExpanded,
@@ -13,6 +14,7 @@ import { readerViewHtml } from '../ui/reader-view';
 import { setShellHtml } from '../ui/shell';
 
 export function renderReader(version: string): void {
+  clearNativeTocHitTargets();
   const meta = getReaderMeta();
   const blocks = getReaderBlocks();
   if (state.readerTocItems.length) ensureActiveTocAncestorsExpanded(state.readerTocItems, meta);
@@ -27,6 +29,9 @@ export function renderReader(version: string): void {
     pinnedBooks: state.pinnedBooks,
     version,
   }));
+  // Keep the original WeRead rows as transparent hit targets so clicks retain
+  // the browser's trusted event and Vue performs the real navigation.
+  queueMicrotask(() => { syncNativeTocHitTargets(); });
   if (state.readerTocOpen) {
     queueMicrotask(() => {
       if (!state.readerTocItems.length) {
@@ -54,10 +59,12 @@ export function refreshReaderMeta(version: string): void {
     return;
   }
   const activeIndex = findActiveTocIndex(state.readerTocItems, meta);
+  const previousActive = state.root.querySelector('.wrf-outline-row.active')?.getAttribute('data-toc-index');
   state.root.querySelectorAll('.wrf-outline-row').forEach((row) => {
     row.classList.toggle('active', Number(row.getAttribute('data-toc-index')) === activeIndex);
   });
-  scrollReaderTocToActive();
+  if (previousActive !== String(activeIndex)) scrollReaderTocToActive();
+  syncNativeTocHitTargets();
 }
 
 export function refreshReaderArticle(): void {

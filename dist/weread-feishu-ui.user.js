@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         微信读书 · 飞书云文档外观
 // @namespace    https://weread.qq.com/
-// @version      0.5.0
+// @version      0.5.8
 // @description  将微信读书网页版重构为飞书云文档风格。
 // @author       local
 // @match        https://weread.qq.com/*
 // @icon         https://weread.qq.com/favicon.ico
 // @run-at       document-start
+// @noframes
 // @grant        unsafeWindow
 // ==/UserScript==
 
@@ -40,6 +41,8 @@
 	//#endregion
 	//#region src/core/page-window.ts
 	var pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+	var alreadyRunning = Boolean(pageWindow.__wrFeishuUIRunning);
+	if (!alreadyRunning) pageWindow.__wrFeishuUIRunning = true;
 	//#endregion
 	//#region src/core/storage.ts
 	var STORAGE = {
@@ -471,13 +474,20 @@
 			".bookInfo_title",
 			"[class*=\"readerTopBar_title\"]"
 		]);
-		let chapter = cleanText(reader?.currentChapter?.title || "") || textOf([
+		let chapter = textOf([
+			".renderTargetPageInfo_header_chapterTitle",
 			".readerTopBar_title_chapter",
 			".readerChapterContent_title",
 			".readerContentHeader_title",
 			"[class*=\"readerTopBar_title_chapter\"]"
 		]);
 		let author = cleanText(reader?.bookInfo?.author || "");
+		if (!chapter && book && author) {
+			const prefix = `${book} - `;
+			const suffix = ` - ${author} - 微信读书`;
+			if (document.title.startsWith(prefix) && document.title.endsWith(suffix)) chapter = cleanText(document.title.slice(prefix.length, -suffix.length));
+		}
+		if (!chapter) chapter = cleanText(reader?.currentChapter?.title || "");
 		if (!book) {
 			const title = document.title.replace(/\s*[-_|｜].*微信读书.*$/i, "").trim();
 			if (title && title !== "微信读书") book = title;
@@ -571,9 +581,6 @@
 		const match = location.pathname.match(/^\/web\/reader\/([^/?#]+)/);
 		return match ? match[1].split("k")[0] : "";
 	}
-	function getReaderChapterHash() {
-		return location.pathname.match(/^\/web\/reader\/[^k/?#]+k([^/?#]+)/)?.[1] || "";
-	}
 	function getCurrentReaderChapterUid() {
 		const queryUid = new URLSearchParams(location.search).get("progressChapterUid");
 		if (queryUid) return queryUid;
@@ -603,23 +610,174 @@
 	function getNativeTocPanel() {
 		return document.querySelector(".readerCatalog, [class*=\"readerCatalog\"]");
 	}
-	function dispatchNativeClick(node) {
-		if (!node.isConnected) return false;
-		const target = node.closest("a,button,[role=\"button\"],[class*=\"item\"],[class*=\"chapter\"]") || node;
-		for (const type of [
-			"pointerdown",
-			"mousedown",
-			"pointerup",
-			"mouseup",
-			"click"
-		]) try {
-			target.dispatchEvent(new MouseEvent(type, {
-				bubbles: true,
-				cancelable: true,
-				view: pageWindow
-			}));
-		} catch {}
-		return true;
+	//#endregion
+	//#region src/reader/chapter-navigation.ts
+	var NAV_LOG = "[微信读书·飞书UI][目录跳转]";
+	var PANEL = "data-wrf-native-hit-panel";
+	var ROW = "data-wrf-native-hit";
+	var PATH = "data-wrf-native-hit-path";
+	var rectProperties = [
+		"--wrf-hit-left",
+		"--wrf-hit-top",
+		"--wrf-hit-width",
+		"--wrf-hit-height"
+	];
+	var marked = /* @__PURE__ */ new Set();
+	var trackedRows = /* @__PURE__ */ new WeakSet();
+	var boundRoots = /* @__PURE__ */ new WeakSet();
+	var frame = 0;
+	var resizeObserver = null;
+	var observedOutline = null;
+	var windowEventsBound = false;
+	var navigationId = 0;
+	function nativeTitle(row) {
+		return cleanText(row.querySelector(".readerCatalog_list_item_title_text")?.textContent || row.getAttribute("title") || "");
+	}
+	function mark(element, attribute, value = "1") {
+		if (element.getAttribute(attribute) !== value) element.setAttribute(attribute, value);
+		marked.add(element);
+	}
+	function unmark(element) {
+		element.removeAttribute(PANEL);
+		element.removeAttribute(ROW);
+		element.removeAttribute(PATH);
+		rectProperties.forEach((property) => element.style.removeProperty(property));
+		marked.delete(element);
+	}
+	function clearNativeTocHitTargets() {
+		cancelAnimationFrame(frame);
+		frame = 0;
+		[...marked].forEach(unmark);
+		resizeObserver?.disconnect();
+		observedOutline = null;
+	}
+	function recordNativeClick(row) {
+		if (trackedRows.has(row)) return;
+		trackedRows.add(row);
+		row.addEventListener("click", (event) => {
+			if (!row.hasAttribute(ROW) || !event.isTrusted) return;
+			const title = nativeTitle(row);
+			const beforeHref = location.href;
+			const id = ++navigationId;
+			console.info(`${NAV_LOG} 原生目录收到真实点击`, {
+				章节: title,
+				isTrusted: event.isTrusted
+			});
+			const started = performance.now();
+			const check = () => {
+				if (id !== navigationId || !state.enabled || state.page !== "reader") return;
+				if (location.href !== beforeHref && getReaderMeta().chapter === title) {
+					console.info(`${NAV_LOG} 已确认目标章节`, {
+						章节: title,
+						地址: location.href
+					});
+					syncNativeTocHitTargets();
+				} else if (performance.now() - started < 8e3) window.setTimeout(check, 150);
+				else console.warn(`${NAV_LOG} 尚未确认目标章节，请检查原生阅读页的登录或购买提示`, { 章节: title });
+			};
+			window.setTimeout(check, 150);
+		}, { capture: true });
+		row.addEventListener("wheel", (event) => {
+			if (!row.hasAttribute(ROW) || !observedOutline) return;
+			event.preventDefault();
+			const scale = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? observedOutline.clientHeight : 1;
+			observedOutline.scrollTop += event.deltaY * scale;
+			updateHitTargets();
+		}, { passive: false });
+	}
+	function updateHitTargets() {
+		frame = 0;
+		const outline = state.root?.querySelector(".wrf-reader-outline");
+		if (!state.enabled || state.page !== "reader" || !state.readerTocOpen || !outline?.isConnected || outline.classList.contains("hidden")) {
+			clearNativeTocHitTargets();
+			return;
+		}
+		if (observedOutline !== outline) {
+			resizeObserver?.disconnect();
+			observedOutline = outline;
+			resizeObserver ??= new ResizeObserver(syncNativeTocHitTargets);
+			resizeObserver.observe(outline);
+		}
+		const panel = getNativeTocPanel();
+		if (!(panel instanceof HTMLElement)) {
+			[...marked].forEach(unmark);
+			return;
+		}
+		const rows = [...panel.querySelectorAll(".readerCatalog_list_item")];
+		const byTitle = /* @__PURE__ */ new Map();
+		const byUid = /* @__PURE__ */ new Map();
+		for (const row of rows) {
+			const title = nativeTitle(row);
+			if (title) byTitle.set(title, [...byTitle.get(title) || [], row]);
+			const uid = extractChapterUid(row);
+			if (uid) byUid.set(uid, [...byUid.get(uid) || [], row]);
+		}
+		const keep = /* @__PURE__ */ new Set();
+		const bounds = outline.getBoundingClientRect();
+		for (const visual of outline.querySelectorAll(".wrf-outline-item")) {
+			const item = state.readerTocItems[Number(visual.dataset.tocIndex)];
+			if (!item || item.locked) continue;
+			const candidates = item.chapterUid && byUid.get(String(item.chapterUid)) || byTitle.get(cleanText(item.title)) || [];
+			if (candidates.length !== 1) continue;
+			const row = candidates[0];
+			if (!row.querySelector(".readerCatalog_list_item_inner")) continue;
+			const rect = visual.getBoundingClientRect();
+			const left = Math.max(rect.left, bounds.left, 0);
+			const top = Math.max(rect.top, bounds.top, 0);
+			const right = Math.min(rect.right, bounds.right, innerWidth);
+			const bottom = Math.min(rect.bottom, bounds.bottom, innerHeight);
+			if (right <= left || bottom <= top) continue;
+			mark(panel, PANEL);
+			keep.add(panel);
+			for (let parent = row.parentElement; parent && parent !== panel; parent = parent.parentElement) {
+				mark(parent, PATH);
+				keep.add(parent);
+			}
+			mark(row, ROW, visual.dataset.tocIndex);
+			keep.add(row);
+			[
+				left,
+				top,
+				right - left,
+				bottom - top
+			].forEach((value, index) => {
+				const text = `${value}px`;
+				if (row.style.getPropertyValue(rectProperties[index]) !== text) row.style.setProperty(rectProperties[index], text);
+			});
+			recordNativeClick(row);
+		}
+		for (const element of [...marked]) if (!keep.has(element)) unmark(element);
+	}
+	function syncNativeTocHitTargets() {
+		if (!windowEventsBound) {
+			windowEventsBound = true;
+			window.addEventListener("resize", syncNativeTocHitTargets, { passive: true });
+			window.addEventListener("scroll", syncNativeTocHitTargets, {
+				passive: true,
+				capture: true
+			});
+		}
+		if (state.root && !boundRoots.has(state.root)) {
+			boundRoots.add(state.root);
+			state.root.addEventListener("scroll", updateHitTargets, {
+				passive: true,
+				capture: true
+			});
+		}
+		if (!frame) frame = requestAnimationFrame(updateHitTargets);
+	}
+	function resolveCurrentReaderChapterUid(items = state.readerTocItems) {
+		const title = getReaderMeta().chapter;
+		const matches = items.filter((item) => item.title === title && item.chapterUid);
+		return matches.length === 1 ? String(matches[0].chapterUid) : getCurrentReaderChapterUid();
+	}
+	async function navigateToReaderTocItem(index, title) {
+		syncNativeTocHitTargets();
+		console.warn(`${NAV_LOG} 未命中原生目录，请切回原界面使用目录`, {
+			章节: title,
+			目录序号: index
+		});
+		return false;
 	}
 	//#endregion
 	//#region src/reader/content.ts
@@ -850,207 +1008,8 @@
 		}).join("");
 	}
 	//#endregion
-	//#region src/reader/chapter-navigation.ts
-	function md5Ascii(input) {
-		const rotateLeft = (value, shift) => value << shift | value >>> 32 - shift;
-		const addUnsigned = (x, y) => {
-			const x4 = x & 1073741824, y4 = y & 1073741824, x8 = x & 2147483648, y8 = y & 2147483648;
-			const result = (x & 1073741823) + (y & 1073741823);
-			if (x4 & y4) return result ^ 2147483648 ^ x8 ^ y8;
-			if (x4 | y4) return result & 1073741824 ? result ^ 3221225472 ^ x8 ^ y8 : result ^ 1073741824 ^ x8 ^ y8;
-			return result ^ x8 ^ y8;
-		};
-		const F = (x, y, z) => x & y | ~x & z;
-		const G = (x, y, z) => x & z | y & ~z;
-		const H = (x, y, z) => x ^ y ^ z;
-		const I = (x, y, z) => y ^ (x | ~z);
-		const step = (fn, a, b, c, d, x, s, ac) => addUnsigned(rotateLeft(addUnsigned(a, addUnsigned(addUnsigned(fn(b, c, d), x), ac)), s), b);
-		const str = String(input);
-		const words = [];
-		let i = 0;
-		for (; i < str.length; i += 1) {
-			const wordIndex = (i - i % 4) / 4;
-			const bytePos = i % 4 * 8;
-			words[wordIndex] = (words[wordIndex] || 0) | str.charCodeAt(i) << bytePos;
-		}
-		const wordIndex = (i - i % 4) / 4;
-		const bytePos = i % 4 * 8;
-		words[wordIndex] = (words[wordIndex] || 0) | 128 << bytePos;
-		const totalWords = ((str.length + 8 >>> 6) + 1) * 16;
-		while (words.length < totalWords) words.push(0);
-		words[totalWords - 2] = str.length << 3;
-		words[totalWords - 1] = str.length >>> 29;
-		let a = 1732584193, b = 4023233417, c = 2562383102, d = 271733878;
-		const S11 = 7, S12 = 12, S13 = 17, S14 = 22, S21 = 5, S22 = 9, S23 = 14, S24 = 20, S31 = 4, S32 = 11, S33 = 16, S34 = 23, S41 = 6, S42 = 10, S43 = 15, S44 = 21;
-		for (let k = 0; k < totalWords; k += 16) {
-			const AA = a, BB = b, CC = c, DD = d;
-			a = step(F, a, b, c, d, words[k], S11, 3614090360);
-			d = step(F, d, a, b, c, words[k + 1], S12, 3905402710);
-			c = step(F, c, d, a, b, words[k + 2], S13, 606105819);
-			b = step(F, b, c, d, a, words[k + 3], S14, 3250441966);
-			a = step(F, a, b, c, d, words[k + 4], S11, 4118548399);
-			d = step(F, d, a, b, c, words[k + 5], S12, 1200080426);
-			c = step(F, c, d, a, b, words[k + 6], S13, 2821735955);
-			b = step(F, b, c, d, a, words[k + 7], S14, 4249261313);
-			a = step(F, a, b, c, d, words[k + 8], S11, 1770035416);
-			d = step(F, d, a, b, c, words[k + 9], S12, 2336552879);
-			c = step(F, c, d, a, b, words[k + 10], S13, 4294925233);
-			b = step(F, b, c, d, a, words[k + 11], S14, 2304563134);
-			a = step(F, a, b, c, d, words[k + 12], S11, 1804603682);
-			d = step(F, d, a, b, c, words[k + 13], S12, 4254626195);
-			c = step(F, c, d, a, b, words[k + 14], S13, 2792965006);
-			b = step(F, b, c, d, a, words[k + 15], S14, 1236535329);
-			a = step(G, a, b, c, d, words[k + 1], S21, 4129170786);
-			d = step(G, d, a, b, c, words[k + 6], S22, 3225465664);
-			c = step(G, c, d, a, b, words[k + 11], S23, 643717713);
-			b = step(G, b, c, d, a, words[k], S24, 3921069994);
-			a = step(G, a, b, c, d, words[k + 5], S21, 3593408605);
-			d = step(G, d, a, b, c, words[k + 10], S22, 38016083);
-			c = step(G, c, d, a, b, words[k + 15], S23, 3634488961);
-			b = step(G, b, c, d, a, words[k + 4], S24, 3889429448);
-			a = step(G, a, b, c, d, words[k + 9], S21, 568446438);
-			d = step(G, d, a, b, c, words[k + 14], S22, 3275163606);
-			c = step(G, c, d, a, b, words[k + 3], S23, 4107603335);
-			b = step(G, b, c, d, a, words[k + 8], S24, 1163531501);
-			a = step(G, a, b, c, d, words[k + 13], S21, 2850285829);
-			d = step(G, d, a, b, c, words[k + 2], S22, 4243563512);
-			c = step(G, c, d, a, b, words[k + 7], S23, 1735328473);
-			b = step(G, b, c, d, a, words[k + 12], S24, 2368359562);
-			a = step(H, a, b, c, d, words[k + 5], S31, 4294588738);
-			d = step(H, d, a, b, c, words[k + 8], S32, 2272392833);
-			c = step(H, c, d, a, b, words[k + 11], S33, 1839030562);
-			b = step(H, b, c, d, a, words[k + 14], S34, 4259657740);
-			a = step(H, a, b, c, d, words[k + 1], S31, 2763975236);
-			d = step(H, d, a, b, c, words[k + 4], S32, 1272893353);
-			c = step(H, c, d, a, b, words[k + 7], S33, 4139469664);
-			b = step(H, b, c, d, a, words[k + 10], S34, 3200236656);
-			a = step(H, a, b, c, d, words[k + 13], S31, 681279174);
-			d = step(H, d, a, b, c, words[k], S32, 3936430074);
-			c = step(H, c, d, a, b, words[k + 3], S33, 3572445317);
-			b = step(H, b, c, d, a, words[k + 6], S34, 76029189);
-			a = step(H, a, b, c, d, words[k + 9], S31, 3654602809);
-			d = step(H, d, a, b, c, words[k + 12], S32, 3873151461);
-			c = step(H, c, d, a, b, words[k + 15], S33, 530742520);
-			b = step(H, b, c, d, a, words[k + 2], S34, 3299628645);
-			a = step(I, a, b, c, d, words[k], S41, 4096336452);
-			d = step(I, d, a, b, c, words[k + 7], S42, 1126891415);
-			c = step(I, c, d, a, b, words[k + 14], S43, 2878612391);
-			b = step(I, b, c, d, a, words[k + 5], S44, 4237533241);
-			a = step(I, a, b, c, d, words[k + 12], S41, 1700485571);
-			d = step(I, d, a, b, c, words[k + 3], S42, 2399980690);
-			c = step(I, c, d, a, b, words[k + 10], S43, 4293915773);
-			b = step(I, b, c, d, a, words[k + 1], S44, 2240044497);
-			a = step(I, a, b, c, d, words[k + 8], S41, 1873313359);
-			d = step(I, d, a, b, c, words[k + 15], S42, 4264355552);
-			c = step(I, c, d, a, b, words[k + 6], S43, 2734768916);
-			b = step(I, b, c, d, a, words[k + 13], S44, 1309151649);
-			a = step(I, a, b, c, d, words[k + 4], S41, 4149444226);
-			d = step(I, d, a, b, c, words[k + 11], S42, 3174756917);
-			c = step(I, c, d, a, b, words[k + 2], S43, 718787259);
-			b = step(I, b, c, d, a, words[k + 9], S44, 3951481745);
-			a = addUnsigned(a, AA);
-			b = addUnsigned(b, BB);
-			c = addUnsigned(c, CC);
-			d = addUnsigned(d, DD);
-		}
-		const hex = (value) => {
-			let out = "";
-			for (let j = 0; j <= 3; j += 1) out += `0${(value >>> j * 8 & 255).toString(16)}`.slice(-2);
-			return out;
-		};
-		return `${hex(a)}${hex(b)}${hex(c)}${hex(d)}`.toLowerCase();
-	}
-	function wereadEncodeId(value) {
-		const text = String(value ?? "");
-		if (!text) return "";
-		const hash = md5Ascii(text);
-		let result = hash.slice(0, 3);
-		let chunks;
-		let typeFlag;
-		if (/^\d+$/.test(text)) {
-			chunks = (text.match(/.{1,9}/g) || []).map((part) => Number(part).toString(16));
-			typeFlag = "3";
-		} else {
-			chunks = [Array.from(text).map((char) => char.charCodeAt(0).toString(16)).join("")];
-			typeFlag = "4";
-		}
-		result += `${typeFlag}2${hash.slice(-2)}`;
-		result += chunks.map((chunk) => `${chunk.length.toString(16).padStart(2, "0")}${chunk}`).join("g");
-		if (result.length < 20) result += hash.slice(0, 20 - result.length);
-		result += md5Ascii(result).slice(0, 3);
-		return result;
-	}
-	function buildReaderChapterUrl(chapterUid) {
-		const uid = String(chapterUid || "").trim();
-		const bookHash = getReaderBookHash();
-		const chapterHash = wereadEncodeId(uid);
-		if (!uid || !bookHash || !chapterHash) return "";
-		return `${location.origin}/web/reader/${bookHash}k${chapterHash}`;
-	}
-	function resolveCurrentReaderChapterUid(items = state.readerTocItems) {
-		const direct = getCurrentReaderChapterUid();
-		if (direct) return direct;
-		const hash = getReaderChapterHash();
-		if (!hash) return "";
-		const matched = items.find((item) => item.chapterUid && wereadEncodeId(item.chapterUid) === hash);
-		return String(matched?.chapterUid || "");
-	}
-	function findLiveNativeTocItem(index, title) {
-		const live = collectNativeTocItems();
-		const wanted = canonicalBookTitle(title);
-		const indexed = Number.isInteger(index) ? live[index] : void 0;
-		if (indexed && (!wanted || canonicalBookTitle(indexed.title) === wanted)) return indexed;
-		return live.find((item) => canonicalBookTitle(item.title) === wanted) || null;
-	}
-	async function navigateToReaderTocItem(index, title) {
-		const saved = state.readerTocItems[index] || null;
-		if (saved?.href) {
-			location.assign(saved.href);
-			return true;
-		}
-		if (saved?.chapterUid) {
-			const url = buildReaderChapterUrl(saved.chapterUid);
-			if (url) {
-				location.assign(url);
-				return true;
-			}
-		}
-		const official = await fetchOfficialReaderToc();
-		const wanted = canonicalBookTitle(title || saved?.title || "");
-		let chapter = official.find((item) => canonicalBookTitle(item.title) === wanted);
-		if (!chapter && Number.isInteger(index)) chapter = official[index];
-		if (chapter?.chapterUid) {
-			const url = buildReaderChapterUrl(chapter.chapterUid);
-			if (url) {
-				location.assign(url);
-				return true;
-			}
-		}
-		const clickLive = () => {
-			const item = findLiveNativeTocItem(index, title || saved?.title || "");
-			if (!item) return false;
-			if (item.href) {
-				location.assign(item.href);
-				return true;
-			}
-			if (item.chapterUid) {
-				const url = buildReaderChapterUrl(item.chapterUid);
-				if (url) {
-					location.assign(url);
-					return true;
-				}
-			}
-			return item.node ? dispatchNativeClick(item.node) : false;
-		};
-		if (clickLive()) return true;
-		if (clickNative("catalog")) {
-			await new Promise((resolve) => window.setTimeout(resolve, 140));
-			return clickLive();
-		}
-		return false;
-	}
-	//#endregion
 	//#region src/reader/toc.ts
+	var TOC_LOG = "[wr-feishu-ui][toc]";
 	function isTocVolumeTitle(title = "") {
 		return /^(第[一二三四五六七八九十百千万零〇0-9]+[卷部篇辑册编]|卷[一二三四五六七八九十百千万零〇0-9]+|part\s*[ivx0-9]+)/i.test(cleanText(title));
 	}
@@ -1080,6 +1039,15 @@
 		} catch {
 			return 0;
 		}
+	}
+	function isNativeTocLocked(node) {
+		const row = node.closest("li,[class*=\"chapter\"],[class*=\"item\"]") || node;
+		if (row.matches("[disabled],[aria-disabled=\"true\"],[data-locked=\"1\"],[data-lock=\"1\"]")) return true;
+		if (row.querySelector("[class*=\"lock\"],[class*=\"Lock\"],[aria-label*=\"锁\"],[title*=\"锁\"]")) return true;
+		const classText = [row, ...Array.from(row.querySelectorAll("[class]")).slice(0, 24)].map((item) => item.getAttribute("class") || "").join(" ").toLowerCase();
+		if (/(^|[\s_-])locked?([\s_-]|$)/.test(classText)) return true;
+		const hint = cleanText(`${row.getAttribute("aria-label") || ""} ${row.getAttribute("title") || ""}`);
+		return /锁定|未购买|需购买|付费章节/.test(hint);
 	}
 	function normalizeTocLevels(items) {
 		if (!items.length) return items;
@@ -1123,12 +1091,15 @@
 	}
 	function collectNativeTocItems() {
 		const panel = getNativeTocPanel();
-		if (!panel) return [];
-		const candidates = [...panel.querySelectorAll("a, button, [role=\"button\"], [class*=\"item\"], [class*=\"chapter\"]")];
+		if (!panel) {
+			console.info(`${TOC_LOG} native catalog panel not found`);
+			return [];
+		}
+		const candidates = [...panel.querySelectorAll(".readerCatalog_list_item")];
 		const seen = /* @__PURE__ */ new Set();
 		const items = [];
 		for (const node of candidates) {
-			const title = cleanText(node.textContent || node.getAttribute("title") || "");
+			const title = cleanText(node.querySelector(".readerCatalog_list_item_title_text")?.textContent || node.getAttribute("title") || "");
 			if (!title || title.length > 120 || [
 				"目录",
 				"关闭",
@@ -1137,28 +1108,46 @@
 			const key = canonicalBookTitle(title);
 			if (!key || seen.has(key)) continue;
 			seen.add(key);
+			const nativeLevel = node.querySelector(".readerCatalog_list_item_inner")?.className.match(/readerCatalog_list_item_level_(\d+)/)?.[1];
 			const dataLevel = [
 				node.getAttribute("data-level"),
 				node.getAttribute("data-depth"),
-				node.getAttribute("data-indent")
-			].map(Number).find(Number.isFinite);
+				nativeLevel
+			].filter((value) => value != null).map(Number).find(Number.isFinite);
+			const locked = isNativeTocLocked(node);
 			items.push({
 				title,
 				href: getActionHref(node),
 				chapterUid: extractChapterUid(node),
 				level: Number.isFinite(dataLevel) ? Number(dataLevel) : 0,
 				rawIndent: getNativeTocRawIndent(node),
-				node
+				node,
+				locked,
+				lockSource: locked ? "native" : void 0
 			});
 			if (items.length >= 300) break;
 		}
+		console.info(`${TOC_LOG} native catalog collected`, {
+			count: items.length,
+			locked: items.filter((item) => item.locked).length,
+			withUid: items.filter((item) => item.chapterUid).length,
+			withHref: items.filter((item) => item.href).length
+		});
 		return normalizeTocLevels(items);
 	}
 	async function fetchOfficialReaderToc() {
 		if (state.readerOfficialToc.length) return state.readerOfficialToc;
 		if (state.readerOfficialTocPromise) return state.readerOfficialTocPromise;
 		const bookId = getReaderBookId();
-		if (!bookId) return [];
+		if (!bookId) {
+			console.warn(`${TOC_LOG} cannot request chapterInfos: bookId not found`, {
+				href: location.href,
+				bookHash: getReaderBookHash(),
+				meta: getReaderMeta()
+			});
+			return [];
+		}
+		console.info(`${TOC_LOG} requesting chapterInfos`, { bookId });
 		state.readerOfficialTocPromise = fetch("/web/book/chapterInfos", {
 			method: "POST",
 			credentials: "include",
@@ -1178,34 +1167,40 @@
 					chapter?.chapterLevel,
 					chapter?.hierarchy
 				].map(Number).find(Number.isFinite);
+				const price = Number(chapter?.price ?? 0);
+				const paid = Number(chapter?.paid ?? 0);
+				const locked = Number.isFinite(price) && price > 0 && paid !== 1;
 				return {
 					title: cleanText(chapter?.title || ""),
 					chapterUid: String(chapter?.chapterUid ?? ""),
 					chapterIdx: Number(chapter?.chapterIdx ?? -1),
-					level: Number.isFinite(rawLevel) ? Number(rawLevel) : 0
+					level: Number.isFinite(rawLevel) ? Number(rawLevel) : 0,
+					price: Number.isFinite(price) ? price : 0,
+					paid: Number.isFinite(paid) ? paid : 0,
+					locked,
+					lockSource: locked ? "official" : void 0
 				};
 			}).filter((chapter) => chapter.title && chapter.chapterUid) : []);
+			console.info(`${TOC_LOG} chapterInfos ready`, {
+				bookId,
+				count: state.readerOfficialToc.length,
+				locked: state.readerOfficialToc.filter((item) => item.locked).length,
+				first: state.readerOfficialToc.slice(0, 3).map((item) => ({
+					title: item.title,
+					chapterUid: item.chapterUid,
+					price: item.price,
+					paid: item.paid,
+					locked: item.locked
+				}))
+			});
 			return state.readerOfficialToc;
 		}).catch((error) => {
-			console.warn("[wr-feishu-ui] chapter catalog fetch failed", error);
+			console.warn(`${TOC_LOG} chapterInfos failed`, error);
 			return [];
 		}).finally(() => {
 			state.readerOfficialTocPromise = null;
 		});
 		return state.readerOfficialTocPromise;
-	}
-	function mergeTocLevelsFromOfficial(items, official) {
-		if (!items.length || !official.length) return items;
-		const byUid = new Map(official.filter((item) => item.chapterUid).map((item) => [String(item.chapterUid), item]));
-		const byTitle = new Map(official.map((item) => [canonicalBookTitle(item.title), item]));
-		return normalizeTocLevels(items.map((item) => {
-			const match = byUid.get(String(item.chapterUid || "")) || byTitle.get(canonicalBookTitle(item.title));
-			return match ? {
-				...item,
-				level: match.level,
-				chapterUid: item.chapterUid || match.chapterUid
-			} : item;
-		}));
 	}
 	function getReaderTocStorageKey() {
 		const hash = getReaderBookHash();
@@ -1289,7 +1284,17 @@
 			scrollReaderTocToActive();
 			return;
 		}
+		const existing = collectNativeTocItems();
+		if (existing.length) {
+			state.readerTocItems = existing;
+			ensureActiveTocAncestorsExpanded(state.readerTocItems);
+			console.info(`${TOC_LOG} using native catalog already in DOM`, { count: existing.length });
+			onUpdated?.();
+			scrollReaderTocToActive();
+			return;
+		}
 		const official = await fetchOfficialReaderToc();
+		if (!state.enabled || state.page !== "reader") return;
 		if (official.length) {
 			state.readerTocItems = official;
 			ensureActiveTocAncestorsExpanded(state.readerTocItems);
@@ -1297,24 +1302,16 @@
 			scrollReaderTocToActive();
 			return;
 		}
-		const existing = collectNativeTocItems();
-		if (existing.length) {
-			state.readerTocItems = existing;
-			ensureActiveTocAncestorsExpanded(state.readerTocItems);
-			onUpdated?.();
-			const enriched = await fetchOfficialReaderToc();
-			if (enriched.length) state.readerTocItems = mergeTocLevelsFromOfficial(state.readerTocItems, enriched);
-			onUpdated?.();
-			scrollReaderTocToActive();
-			return;
-		}
-		if (!clickNative("catalog")) return;
-		await new Promise((resolve) => window.setTimeout(resolve, 180));
+		const opened = clickNative("catalog");
+		console.info(`${TOC_LOG} opening native catalog for discovery`, { opened });
+		if (!opened) return;
+		await new Promise((resolve) => window.setTimeout(resolve, 220));
 		const items = collectNativeTocItems();
 		clickNative("catalog");
 		if (items.length) {
 			state.readerTocItems = items;
 			ensureActiveTocAncestorsExpanded(items);
+			console.info(`${TOC_LOG} using native catalog after opening`, { count: items.length });
 			onUpdated?.();
 			scrollReaderTocToActive();
 		}
@@ -1346,7 +1343,8 @@
 			eye: "<path d=\"M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z\"/><circle cx=\"12\" cy=\"12\" r=\"2.5\"/>",
 			edit: "<path d=\"M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16v4Z\"/><path d=\"m13.5 6.5 4 4\"/>",
 			bell: "<path d=\"M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7\"/><path d=\"M10 19h4\"/>",
-			plus: "<path d=\"M12 5v14M5 12h14\"/>"
+			plus: "<path d=\"M12 5v14M5 12h14\"/>",
+			lock: "<rect x=\"6.5\" y=\"10\" width=\"11\" height=\"9\" rx=\"2\"/><path d=\"M9 10V7.5a3 3 0 0 1 6 0V10\"/>"
 		}[name]}</svg>`;
 	}
 	function larkLogo() {
@@ -1439,11 +1437,13 @@
 			const hasChildren = hasTocChildren(items, index);
 			const key = tocItemStableKey(item, index);
 			const isCollapsed = hasChildren && collapsed.has(key);
+			const locked = Boolean(item.locked);
 			if (!hiddenByAncestor) {
 				const fold = hasChildren ? `<button class="wrf-outline-fold ${isCollapsed ? "collapsed" : ""}" data-action="toc-fold" data-toc-index="${index}" aria-label="${isCollapsed ? "展开" : "收起"} ${escapeHtml(item.title)}">${icon("chevron", 13)}</button>` : `<span class="wrf-outline-fold placeholder">${icon("chevron", 13)}</span>`;
+				const itemTitle = locked ? `${item.title}（已锁定）` : item.title;
 				rows.push(`
-        <div class="wrf-outline-row ${index === activeIndex ? "active" : ""}" data-toc-index="${index}" data-level="${level}" style="--wrf-toc-level:${level}">
-          ${fold}<button class="wrf-outline-item" data-action="toc-item" data-toc-index="${index}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</button>
+        <div class="wrf-outline-row ${index === activeIndex ? "active" : ""} ${locked ? "locked" : ""}" data-toc-index="${index}" data-level="${level}" style="--wrf-toc-level:${level}">
+          ${fold}<button class="wrf-outline-item" data-action="toc-item" data-toc-index="${index}" title="${escapeHtml(itemTitle)}" ${locked ? "disabled aria-disabled=\"true\"" : ""}>${escapeHtml(item.title)}</button>${locked ? `<span class="wrf-outline-lock" title="该章节在微信读书中处于锁定状态">${icon("lock", 13)}</span>` : ""}
         </div>`);
 			}
 			if (isCollapsed) collapsedAncestors.push({
@@ -1480,6 +1480,9 @@
 	//#region src/styles/native.css?inline
 	var native_default = "html.wrf-enabled,html.wrf-enabled body{background:#fff!important}html.wrf-enabled body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",\"PingFang SC\",\"Microsoft YaHei\",Arial,sans-serif!important}\nhtml.wrf-enabled[data-wrf-page=\"home\"] body{overflow:hidden!important}html.wrf-enabled[data-wrf-page=\"home\"] #routerView,html.wrf-enabled[data-wrf-page=\"home\"] .wr_header,html.wrf-enabled[data-wrf-page=\"home\"] .wr_navBar,html.wrf-enabled[data-wrf-page=\"home\"] .wr_index_page_header{display:none!important}\nhtml.wrf-enabled[data-wrf-page=\"reader\"] body{background:#fff!important}html.wrf-enabled[data-wrf-page=\"reader\"] .readerTopBar{display:none!important}html.wrf-enabled[data-wrf-page=\"reader\"] .readerContent{box-sizing:border-box!important;margin-left:0!important;width:100%!important;padding-top:58px!important;background:#fff!important}html.wrf-enabled[data-wrf-page=\"reader\"] .readerContent .app_content,html.wrf-enabled[data-wrf-page=\"reader\"] .app_content:not(#routerView){box-sizing:border-box!important;opacity:0!important;pointer-events:none!important;user-select:none!important;max-width:1040px!important;width:min(1040px,calc(100vw - 120px))!important;margin-left:auto!important;margin-right:auto!important;padding-left:72px!important;padding-right:72px!important;background:#fff!important}html.wrf-enabled[data-wrf-page=\"reader\"] .readerControls{opacity:0!important;pointer-events:none!important}html.wrf-enabled[data-wrf-page=\"reader\"] .readerCatalog,html.wrf-enabled[data-wrf-page=\"reader\"] .readerNotePanel{z-index:999995!important;top:58px!important;bottom:0!important;border-radius:0!important;border:0!important;background:#fff!important}html.wrf-enabled[data-wrf-page=\"reader\"] .readerNotePanel{z-index:1000010!important}html.wrf-enabled[data-wrf-page=\"reader\"] .wr_mask{z-index:999991!important}\n@media(max-width:1100px){html.wrf-enabled[data-wrf-page=\"reader\"] .readerContent .app_content,html.wrf-enabled[data-wrf-page=\"reader\"] .app_content:not(#routerView){width:min(900px,calc(100vw - 48px))!important;padding-left:24px!important;padding-right:24px!important}}\n";
 	//#endregion
+	//#region src/styles/native-toc.css?inline
+	var native_toc_default = "/* Real Vue-owned rows receive input; the shadow DOM supplies the visuals. */\nhtml.wrf-enabled[data-wrf-page=\"reader\"] [data-wrf-native-hit-panel] {\n  display: block !important;\n  visibility: visible !important;\n  position: fixed !important;\n  inset: 0 !important;\n  margin: 0 !important;\n  width: 100vw !important;\n  height: 100vh !important;\n  max-width: none !important;\n  max-height: none !important;\n  transform: none !important;\n  overflow: visible !important;\n  opacity: 0 !important;\n  pointer-events: none !important;\n  z-index: 1000002 !important;\n}\nhtml.wrf-enabled [data-wrf-native-hit-panel] * {\n  pointer-events: none !important;\n  visibility: hidden !important;\n}\nhtml.wrf-enabled [data-wrf-native-hit-path] {\n  display: block !important;\n  overflow: visible !important;\n  transform: none !important;\n  contain: none !important;\n}\nhtml.wrf-enabled [data-wrf-native-hit] {\n  display: block !important;\n  position: fixed !important;\n  left: var(--wrf-hit-left) !important;\n  top: var(--wrf-hit-top) !important;\n  width: var(--wrf-hit-width) !important;\n  height: var(--wrf-hit-height) !important;\n  min-height: 0 !important;\n  max-height: none !important;\n  box-sizing: border-box !important;\n  margin: 0 !important;\n  padding: 0 !important;\n  border: 0 !important;\n  transform: none !important;\n  overflow: hidden !important;\n}\nhtml.wrf-enabled [data-wrf-native-hit] .readerCatalog_list_item_inner {\n  visibility: visible !important;\n  pointer-events: auto !important;\n  position: absolute !important;\n  inset: 0 !important;\n  width: 100% !important;\n  height: 100% !important;\n  min-height: 0 !important;\n  max-height: none !important;\n  margin: 0 !important;\n  padding: 0 !important;\n  border: 0 !important;\n  cursor: pointer !important;\n}\n";
+	//#endregion
 	//#region src/styles/tokens.css?inline
 	var tokens_default = ":host { all: initial; }\n.wrf-shell {\n  --wrf-text: #1f2329;\n  --wrf-muted: #8f959e;\n  --wrf-line: #e5e6eb;\n  --wrf-hover: #f2f3f5;\n  --wrf-blue: #3370ff;\n  --wrf-side: #f5f6f7;\n  --wrf-sidebar-width: 208px;\n}\n";
 	//#endregion
@@ -1493,7 +1496,7 @@
 	var reader_default = ".wrf-reader-shell .wrf-topbar{left:var(--wrf-sidebar-width)}.wrf-reader-main{position:absolute;top:58px;left:var(--wrf-sidebar-width);right:0;bottom:0;overflow:auto;background:#fff;pointer-events:auto;z-index:3;transition:left .16s ease}.wrf-reader-main.with-outline{left:calc(var(--wrf-sidebar-width) + 220px)}\n.wrf-article{width:min(760px,calc(100% - 96px));margin:0 auto;padding:54px 0 160px;color:#1f2329;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",\"PingFang SC\",\"Microsoft YaHei\",sans-serif}.wrf-article-title{margin:0;color:#1f2329;font-size:32px;line-height:1.32;font-weight:700;letter-spacing:-.02em}.wrf-article-meta{display:flex;align-items:center;gap:12px;margin:14px 0 24px;color:#8f959e;font-size:12px}.wrf-article-divider{height:1px;background:#f0f1f2;margin:0 0 28px}.wrf-article-body{font-size:16px;line-height:1.78;color:#1f2329}.wrf-md-p{margin:0 0 13px;white-space:pre-wrap;word-break:break-word}.wrf-md-h2{margin:34px 0 14px;font-size:23px;line-height:1.4;font-weight:700;letter-spacing:-.01em}.wrf-md-h3{margin:28px 0 12px;font-size:18px;line-height:1.45;font-weight:650}.wrf-md-quote{margin:16px 0;padding:2px 0 2px 13px;border-left:3px solid #c9cdd4;color:#646a73}.wrf-md-code{margin:16px 0;padding:14px 16px;border:1px solid #e5e6eb;border-radius:6px;background:#f5f6f7;color:#1f2329;font:13px/1.65 \"SFMono-Regular\",Consolas,\"Liberation Mono\",monospace;white-space:pre-wrap;overflow-wrap:anywhere}.wrf-article-loading{padding:40px 0;color:#8f959e;font-size:13px;line-height:1.8}\n@media(max-width:1100px){.wrf-article{width:min(760px,calc(100% - 44px));padding-top:38px}.wrf-reader-main.with-outline{left:calc(var(--wrf-sidebar-width) + 220px)}}\n";
 	//#endregion
 	//#region src/styles/toc.css?inline
-	var toc_default = ".wrf-toc-toggle{position:absolute;left:calc(var(--wrf-sidebar-width) + 10px);top:74px;width:34px;height:34px;border:0;border-radius:7px;background:#fff;color:#3370ff;display:grid;place-items:center;cursor:pointer;pointer-events:auto;z-index:8;box-shadow:0 3px 12px rgba(31,35,41,.10);transition:left .16s ease}.wrf-toc-toggle.open{left:calc(var(--wrf-sidebar-width) + 228px)}.wrf-toc-toggle:hover{background:#f5f7ff}.wrf-toc-toggle::after{content:attr(data-tooltip);position:absolute;left:0;top:-36px;padding:7px 10px;border-radius:6px;background:#1f2329;color:#fff;font-size:12px;line-height:1;white-space:nowrap;opacity:0;transform:translateY(4px);pointer-events:none;transition:opacity .12s ease,transform .12s ease}.wrf-toc-toggle:hover::after{opacity:1;transform:translateY(0)}\n.wrf-reader-outline{position:absolute;top:58px;left:var(--wrf-sidebar-width);bottom:0;width:220px;background:#fff;border-right:1px solid #eceef1;pointer-events:auto;overflow:auto;z-index:4;padding:12px 8px 24px;transition:transform .16s ease,opacity .16s ease}.wrf-reader-outline.hidden{transform:translateX(-100%);opacity:0;pointer-events:none}.wrf-outline-title{padding:4px 10px 8px;color:#8f959e;font-size:12px;font-weight:500}.wrf-outline-row{width:100%;min-height:31px;border-radius:5px;display:flex;align-items:flex-start;padding-left:calc(6px + var(--wrf-toc-level,0)*16px);transition:background .12s ease}.wrf-outline-row:hover{background:#f5f6f7}.wrf-outline-row.active{background:#eef3ff}.wrf-outline-fold{width:18px;height:31px;flex:0 0 18px;border:0;padding:0;background:transparent;color:#8f959e;display:grid;place-items:center;cursor:pointer}.wrf-outline-fold svg{width:13px;height:13px;transition:transform .14s ease;transform:rotate(90deg)}.wrf-outline-fold.collapsed svg{transform:rotate(0deg)}.wrf-outline-fold.placeholder{visibility:hidden;pointer-events:none}.wrf-outline-fold:hover{color:#3370ff}.wrf-outline-item{min-width:0;flex:1;min-height:31px;border:0;background:transparent;color:#646a73;display:block;padding:6px 8px 5px 2px;text-align:left;cursor:pointer;font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis}.wrf-outline-row[data-level=\"0\"] .wrf-outline-item{color:#3f4752;font-weight:600}.wrf-outline-row[data-level=\"1\"] .wrf-outline-item{color:#59636f;font-weight:500}.wrf-outline-row[data-level=\"2\"] .wrf-outline-item,.wrf-outline-row[data-level=\"3\"] .wrf-outline-item,.wrf-outline-row[data-level=\"4\"] .wrf-outline-item{color:#7a838d;font-size:11.5px}.wrf-outline-row.active .wrf-outline-item{color:#245bdb;font-weight:600}.wrf-outline-empty{padding:14px 10px;color:#8f959e;font-size:12px;line-height:1.6}\n";
+	var toc_default = ".wrf-toc-toggle{position:absolute;left:calc(var(--wrf-sidebar-width) + 10px);top:74px;width:34px;height:34px;border:0;border-radius:7px;background:#fff;color:#3370ff;display:grid;place-items:center;cursor:pointer;pointer-events:auto;z-index:8;box-shadow:0 3px 12px rgba(31,35,41,.10);transition:left .16s ease}.wrf-toc-toggle.open{left:calc(var(--wrf-sidebar-width) + 228px)}.wrf-toc-toggle:hover{background:#f5f7ff}.wrf-toc-toggle::after{content:attr(data-tooltip);position:absolute;left:0;top:-36px;padding:7px 10px;border-radius:6px;background:#1f2329;color:#fff;font-size:12px;line-height:1;white-space:nowrap;opacity:0;transform:translateY(4px);pointer-events:none;transition:opacity .12s ease,transform .12s ease}.wrf-toc-toggle:hover::after{opacity:1;transform:translateY(0)}\n.wrf-reader-outline{position:absolute;top:58px;left:var(--wrf-sidebar-width);bottom:0;width:220px;background:#fff;border-right:1px solid #eceef1;pointer-events:auto;overflow:auto;z-index:4;padding:12px 8px 24px;transition:transform .16s ease,opacity .16s ease}.wrf-reader-outline.hidden{transform:translateX(-100%);opacity:0;pointer-events:none}.wrf-outline-title{padding:4px 10px 8px;color:#8f959e;font-size:12px;font-weight:500}.wrf-outline-row{width:100%;min-height:31px;border-radius:5px;display:flex;align-items:flex-start;padding-left:calc(6px + var(--wrf-toc-level,0)*16px);transition:background .12s ease}.wrf-outline-row:hover{background:#f5f6f7}.wrf-outline-row.active{background:#eef3ff}.wrf-outline-fold{width:18px;height:31px;flex:0 0 18px;border:0;padding:0;background:transparent;color:#8f959e;display:grid;place-items:center;cursor:pointer}.wrf-outline-fold svg{width:13px;height:13px;transition:transform .14s ease;transform:rotate(90deg)}.wrf-outline-fold.collapsed svg{transform:rotate(0deg)}.wrf-outline-fold.placeholder{visibility:hidden;pointer-events:none}.wrf-outline-fold:hover{color:#3370ff}.wrf-outline-item{min-width:0;flex:1;min-height:31px;border:0;background:transparent;color:#646a73;display:block;padding:6px 8px 5px 2px;text-align:left;cursor:pointer;font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis}.wrf-outline-row[data-level=\"0\"] .wrf-outline-item{color:#3f4752;font-weight:600}.wrf-outline-row[data-level=\"1\"] .wrf-outline-item{color:#59636f;font-weight:500}.wrf-outline-row[data-level=\"2\"] .wrf-outline-item,.wrf-outline-row[data-level=\"3\"] .wrf-outline-item,.wrf-outline-row[data-level=\"4\"] .wrf-outline-item{color:#7a838d;font-size:11.5px}.wrf-outline-row.active .wrf-outline-item{color:#245bdb;font-weight:600}.wrf-outline-row.locked{opacity:.62}.wrf-outline-row.locked:hover{background:transparent}.wrf-outline-row.locked .wrf-outline-item{color:#8f959e!important;cursor:not-allowed}.wrf-outline-row.locked .wrf-outline-item:disabled{opacity:1}.wrf-outline-lock{width:22px;height:31px;flex:0 0 22px;color:#8f959e;display:grid;place-items:center}.wrf-outline-lock svg{width:13px;height:13px}.wrf-outline-empty{padding:14px 10px;color:#8f959e;font-size:12px;line-height:1.6}\n";
 	//#endregion
 	//#region src/ui/shell.ts
 	var HOST_ID = "wr-feishu-ui-host";
@@ -1509,7 +1512,7 @@
 		if (document.getElementById(STYLE_ID)) return;
 		const style = document.createElement("style");
 		style.id = STYLE_ID;
-		style.textContent = native_default;
+		style.textContent = `${native_default}\n${native_toc_default}`;
 		(document.head || document.documentElement).appendChild(style);
 	}
 	function ensureHost() {
@@ -1548,6 +1551,7 @@
 	//#endregion
 	//#region src/pages/reader.ts
 	function renderReader(version) {
+		clearNativeTocHitTargets();
 		const meta = getReaderMeta();
 		const blocks = getReaderBlocks();
 		if (state.readerTocItems.length) ensureActiveTocAncestorsExpanded(state.readerTocItems, meta);
@@ -1562,6 +1566,9 @@
 			pinnedBooks: state.pinnedBooks,
 			version
 		}));
+		queueMicrotask(() => {
+			syncNativeTocHitTargets();
+		});
 		if (state.readerTocOpen) queueMicrotask(() => {
 			if (!state.readerTocItems.length) {
 				primeReaderToc(() => renderReader(version));
@@ -1583,10 +1590,12 @@
 			return;
 		}
 		const activeIndex = findActiveTocIndex(state.readerTocItems, meta);
+		const previousActive = state.root.querySelector(".wrf-outline-row.active")?.getAttribute("data-toc-index");
 		state.root.querySelectorAll(".wrf-outline-row").forEach((row) => {
 			row.classList.toggle("active", Number(row.getAttribute("data-toc-index")) === activeIndex);
 		});
-		scrollReaderTocToActive();
+		if (previousActive !== String(activeIndex)) scrollReaderTocToActive();
+		syncNativeTocHitTargets();
 	}
 	function refreshReaderArticle() {
 		if (!state.enabled || !state.root || state.page !== "reader") return;
@@ -1848,6 +1857,7 @@
 		});
 	}
 	function renderCurrentPage(version, force = false) {
+		if (!state.enabled || state.page !== "reader") clearNativeTocHitTargets();
 		if (state.page === "none") {
 			hideHost();
 			return;
@@ -1879,6 +1889,7 @@
 		const previousPage = state.page;
 		const urlChanged = state.lastUrl !== location.href;
 		const changed = previousPage !== nextPage || urlChanged;
+		if (changed) clearNativeTocHitTargets();
 		const nextReaderBookKey = nextPage === "reader" ? getReaderTocStorageKey() : "";
 		const readerBookChanged = Boolean(nextPage === "reader" && state.readerBookKey && nextReaderBookKey && state.readerBookKey !== nextReaderBookKey);
 		if (changed && nextPage === "reader") {
@@ -1928,6 +1939,7 @@
 				if (state.page === "reader") {
 					refreshReaderMeta(version);
 					refreshReaderArticle();
+					syncNativeTocHitTargets();
 				} else if (state.page === "home") {
 					const books = refreshHome(version);
 					if (books) {
@@ -1945,16 +1957,19 @@
 	}
 	//#endregion
 	//#region version.ts
-	var VERSION = "0.5.0";
+	var VERSION = "0.5.8";
 	//#endregion
 	//#region src/main.ts
-	installCanvasCapture(refreshReaderArticle);
-	function boot() {
-		ensureGlobalStyle();
-		startRouter(VERSION);
-		console.info(`[wr-feishu-ui] v${VERSION} ready. Alt+F toggles the skin.`);
+	if (pageWindow.top !== pageWindow) {} else if (alreadyRunning) console.info("[wr-feishu-ui] duplicate instance ignored");
+	else {
+		installCanvasCapture(refreshReaderArticle);
+		function boot() {
+			ensureGlobalStyle();
+			startRouter(VERSION);
+			console.info(`[wr-feishu-ui] v${VERSION} ready. Alt+F toggles the skin.`);
+		}
+		if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot, { once: true });
+		else boot();
 	}
-	if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot, { once: true });
-	else boot();
 	//#endregion
 })();

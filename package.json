@@ -7,9 +7,11 @@
     "dev": "vite build --watch",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run build"
+    "check": "npm run typecheck && npm run build",
+    "test:edge": "node scripts/test-edge-navigation.cjs"
   },
   "devDependencies": {
+    "playwright": "^1.63.0",
     "typescript": "^5.9.2",
     "vite": "^8.0.0"
   }

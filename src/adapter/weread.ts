@@ -247,10 +247,21 @@ export function getReaderMeta(): ReaderMeta {
   let book = cleanText(reader?.bookInfo?.title || '') || textOf([
     '.readerTopBar_title_link', '.readerTopBar_title', '.bookInfo_title', '[class*="readerTopBar_title"]',
   ]);
-  let chapter = cleanText(reader?.currentChapter?.title || '') || textOf([
+  // INITIAL_STATE is a server snapshot and can retain the previous chapter.
+  let chapter = textOf([
+    '.renderTargetPageInfo_header_chapterTitle',
     '.readerTopBar_title_chapter', '.readerChapterContent_title', '.readerContentHeader_title', '[class*="readerTopBar_title_chapter"]',
   ]);
   let author = cleanText(reader?.bookInfo?.author || '');
+
+  if (!chapter && book && author) {
+    const prefix = `${book} - `;
+    const suffix = ` - ${author} - 微信读书`;
+    if (document.title.startsWith(prefix) && document.title.endsWith(suffix)) {
+      chapter = cleanText(document.title.slice(prefix.length, -suffix.length));
+    }
+  }
+  if (!chapter) chapter = cleanText(reader?.currentChapter?.title || '');
 
   if (!book) {
     const title = document.title.replace(/\s*[-_|｜].*微信读书.*$/i, '').trim();

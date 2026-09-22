@@ -1,0 +1,57 @@
+/* Real Vue-owned rows receive input; the shadow DOM supplies the visuals. */
+html.wrf-enabled[data-wrf-page="reader"] [data-wrf-native-hit-panel] {
+  display: block !important;
+  visibility: visible !important;
+  position: fixed !important;
+  inset: 0 !important;
+  margin: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  max-height: none !important;
+  transform: none !important;
+  overflow: visible !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  z-index: 1000002 !important;
+}
+html.wrf-enabled [data-wrf-native-hit-panel] * {
+  pointer-events: none !important;
+  visibility: hidden !important;
+}
+html.wrf-enabled [data-wrf-native-hit-path] {
+  display: block !important;
+  overflow: visible !important;
+  transform: none !important;
+  contain: none !important;
+}
+html.wrf-enabled [data-wrf-native-hit] {
+  display: block !important;
+  position: fixed !important;
+  left: var(--wrf-hit-left) !important;
+  top: var(--wrf-hit-top) !important;
+  width: var(--wrf-hit-width) !important;
+  height: var(--wrf-hit-height) !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  box-sizing: border-box !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  transform: none !important;
+  overflow: hidden !important;
+}
+html.wrf-enabled [data-wrf-native-hit] .readerCatalog_list_item_inner {
+  visibility: visible !important;
+  pointer-events: auto !important;
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  cursor: pointer !important;
+}

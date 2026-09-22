@@ -1,5 +1,6 @@
 import { state } from '../core/state';
 import nativeCss from '../styles/native.css?inline';
+import nativeTocCss from '../styles/native-toc.css?inline';
 import tokensCss from '../styles/tokens.css?inline';
 import commonCss from '../styles/common.css?inline';
 import homeCss from '../styles/home.css?inline';
@@ -15,7 +16,7 @@ export function ensureGlobalStyle(): void {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
   style.id = STYLE_ID;
-  style.textContent = nativeCss;
+  style.textContent = `${nativeCss}\n${nativeTocCss}`;
   (document.head || document.documentElement).appendChild(style);
 }
 

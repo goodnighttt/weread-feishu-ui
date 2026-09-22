@@ -4,7 +4,7 @@ import { detectPage, patchHistory } from './core/route';
 import { state } from './core/state';
 import { STORAGE, writeBoolean } from './core/storage';
 import { clearCanvasCapture } from './reader/canvas-capture';
-import { navigateToReaderTocItem } from './reader/chapter-navigation';
+import { navigateToReaderTocItem, clearNativeTocHitTargets, syncNativeTocHitTargets } from './reader/chapter-navigation';
 import {
   getReaderTocStorageKey,
   primeReaderToc,
@@ -140,6 +140,7 @@ function bindUiEvents(version: string): void {
 }
 
 export function renderCurrentPage(version: string, force = false): void {
+  if (!state.enabled || state.page !== 'reader') clearNativeTocHitTargets();
   if (state.page === 'none') {
     hideHost();
     return;
@@ -178,6 +179,7 @@ export function applyPageState(version: string, force = false): void {
   const previousPage = state.page;
   const urlChanged = state.lastUrl !== location.href;
   const changed = previousPage !== nextPage || urlChanged;
+  if (changed) clearNativeTocHitTargets();
   const nextReaderBookKey = nextPage === 'reader' ? getReaderTocStorageKey() : '';
   const readerBookChanged = Boolean(nextPage === 'reader' && state.readerBookKey && nextReaderBookKey && state.readerBookKey !== nextReaderBookKey);
 
@@ -234,6 +236,7 @@ export function startRouter(version: string): void {
       if (state.page === 'reader') {
         refreshReaderMeta(version);
         refreshReaderArticle();
+        syncNativeTocHitTargets();
       } else if (state.page === 'home') {
         const books = refreshHome(version);
         if (books) {

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, copyFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createUserscriptMeta } from './userscript.meta.ts';
 
@@ -29,6 +29,12 @@ export default {
       name: 'userscript-banner',
       buildStart() {
         this.addWatchFile(versionFile);
+      },
+      closeBundle() {
+        copyFileSync(
+          fileURLToPath(new URL('./dist/weread-feishu-ui.user.js', import.meta.url)),
+          fileURLToPath(new URL('./weread-feishu-ui.user.js', import.meta.url)),
+        );
       },
       generateBundle(_options: unknown, bundle: Record<string, any>) {
         const userscriptMeta = createUserscriptMeta(readVersion());

@@ -110,17 +110,18 @@ export function collectNativeTocItems(): TocItem[] {
     return [];
   }
 
-  const candidates = [...panel.querySelectorAll('a, button, [role="button"], [class*="item"], [class*="chapter"]')];
+  const candidates = [...panel.querySelectorAll('.readerCatalog_list_item')];
   const seen = new Set<string>();
   const items: TocItem[] = [];
   for (const node of candidates) {
-    const title = cleanText(node.textContent || node.getAttribute('title') || '');
+    const title = cleanText(node.querySelector('.readerCatalog_list_item_title_text')?.textContent || node.getAttribute('title') || '');
     if (!title || title.length > 120 || ['目录', '关闭', '返回'].includes(title)) continue;
     const key = canonicalBookTitle(title);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    const dataLevel = [node.getAttribute('data-level'), node.getAttribute('data-depth'), node.getAttribute('data-indent')]
-      .map(Number).find(Number.isFinite);
+    const nativeLevel = node.querySelector('.readerCatalog_list_item_inner')?.className.match(/readerCatalog_list_item_level_(\d+)/)?.[1];
+    const dataLevel = [node.getAttribute('data-level'), node.getAttribute('data-depth'), nativeLevel]
+      .filter(value => value != null).map(Number).find(Number.isFinite);
     const locked = isNativeTocLocked(node);
     items.push({
       title,
@@ -328,24 +329,23 @@ export async function primeReaderToc(onUpdated?: () => void): Promise<void> {
     return;
   }
 
-  const official = await fetchOfficialReaderToc();
-  if (official.length) {
-    state.readerTocItems = official;
-    ensureActiveTocAncestorsExpanded(state.readerTocItems);
-    console.info(`${TOC_LOG} using official catalog`, { count: official.length });
-    onUpdated?.();
-    scrollReaderTocToActive();
-    return;
-  }
-
+  // The native rows are already rendered, including current access state.
+  // Show them immediately instead of waiting on an authenticated API request.
   const existing = collectNativeTocItems();
   if (existing.length) {
     state.readerTocItems = existing;
     ensureActiveTocAncestorsExpanded(state.readerTocItems);
     console.info(`${TOC_LOG} using native catalog already in DOM`, { count: existing.length });
     onUpdated?.();
-    const enriched = await fetchOfficialReaderToc();
-    if (enriched.length) state.readerTocItems = mergeTocLevelsFromOfficial(state.readerTocItems, enriched);
+    scrollReaderTocToActive();
+    return;
+  }
+
+  const official = await fetchOfficialReaderToc();
+  if (!state.enabled || state.page !== 'reader') return;
+  if (official.length) {
+    state.readerTocItems = official;
+    ensureActiveTocAncestorsExpanded(state.readerTocItems);
     onUpdated?.();
     scrollReaderTocToActive();
     return;
