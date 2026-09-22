@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信读书 · 飞书云文档外观
 // @namespace    https://weread.qq.com/
-// @version      0.5.8
+// @version      0.5.9
 // @description  将微信读书网页版重构为飞书云文档风格。
 // @author       local
 // @match        https://weread.qq.com/*
@@ -1467,8 +1467,10 @@
         <article class="wrf-article">
           <h1 class="wrf-article-title">${escapeHtml(meta.chapter)}</h1>
           <div class="wrf-article-meta"><span>${escapeHtml(meta.author)}</span><span>·</span><span>${escapeHtml(meta.book)}</span></div>
+          <p class="wrf-article-load-hint">正文按阅读进度加载，向下滚动可继续加载。</p>
           <div class="wrf-article-divider"></div>
           <div class="wrf-article-body" data-reader-body>${readerBlocksHtml(blocks)}</div>
+          <div class="wrf-article-load-status" data-reader-load-status role="status" aria-live="polite" aria-atomic="true" ${blocks.length ? "" : "hidden"}>正文按阅读进度加载</div>
         </article>
       </main>
     </div>`;
@@ -1493,7 +1495,7 @@
 	var home_default = ".wrf-home-main{position:absolute;top:58px;left:var(--wrf-sidebar-width);right:0;bottom:0;overflow:auto;background:#fff;pointer-events:auto}.wrf-home-inner{width:min(1180px,calc(100% - 64px));margin:0 auto;padding:28px 0 72px}.wrf-home-title{font-weight:650;font-size:18px;color:#1f2329}\n.wrf-quick-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;max-width:760px;margin-bottom:28px}.wrf-quick-card{height:76px;border:1px solid #dee1e6;border-radius:8px;background:#fff;display:flex;align-items:center;gap:12px;padding:0 18px;cursor:pointer;text-align:left}.wrf-quick-card:hover{background:#fafbfc;border-color:#cfd3da;box-shadow:0 3px 10px rgba(31,35,41,.05)}.wrf-quick-icon{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;flex:0 0 auto;background:#eef3ff;color:#3370ff}.wrf-quick-card:nth-child(2) .wrf-quick-icon{background:#fff3e8;color:#ff8800}.wrf-quick-card:nth-child(3) .wrf-quick-icon{background:#f3efff;color:#7b67ee}.wrf-quick-copy{min-width:0}.wrf-quick-title{font-size:14px;font-weight:600;color:#1f2329}.wrf-quick-desc{margin-top:3px;font-size:12px;color:#8f959e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n.wrf-home-tabs{height:42px;display:flex;align-items:flex-end;gap:28px;border-bottom:1px solid #ebecef;margin-bottom:10px}.wrf-home-tab{position:relative;height:42px;padding:0 1px;border:0;background:transparent;color:#646a73;font-size:14px;cursor:pointer}.wrf-home-tab.active{color:#3370ff;font-weight:500}.wrf-home-tab.active::after{content:\"\";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#3370ff;border-radius:2px}.wrf-list-toolbar{height:44px;display:flex;align-items:center;justify-content:flex-end;gap:8px}.wrf-ghost-action{height:30px;border:0;background:transparent;border-radius:6px;padding:0 9px;color:#646a73;cursor:pointer;font-size:12px}.wrf-ghost-action:hover{background:#f2f3f5}\n.wrf-doc-table{width:100%;border-collapse:collapse;table-layout:fixed}.wrf-doc-table th{height:38px;border-bottom:1px solid #ebecef;color:#8f959e;font-size:12px;font-weight:400;text-align:left;padding:0 12px}.wrf-doc-table td{height:52px;border-bottom:1px solid #f0f1f2;color:#4e5969;font-size:13px;padding:0 12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wrf-doc-row{cursor:pointer}.wrf-doc-row:hover td{background:#f7f8fa}.wrf-doc-title-cell{display:flex;align-items:center;gap:10px;min-width:0;height:52px}.wrf-file-icon{width:20px;height:24px;border-radius:4px;background:#3370ff;flex:0 0 auto;position:relative}.wrf-file-icon::before,.wrf-file-icon::after{content:\"\";position:absolute;left:5px;right:5px;height:1px;background:rgba(255,255,255,.85)}.wrf-file-icon::before{top:9px}.wrf-file-icon::after{top:13px}.wrf-doc-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1f2329;font-weight:500}.wrf-doc-location{display:inline-flex;align-items:center;gap:5px;color:#8f959e}.wrf-avatar{width:24px;height:24px;border-radius:50%;display:inline-grid;place-items:center;background:#eef3ff;color:#245bdb;font-size:11px;margin-right:7px;vertical-align:middle}.wrf-empty{padding:58px 20px;text-align:center;color:#8f959e;font-size:13px}\n.wrf-home-searchbar{display:none;position:absolute;left:calc(var(--wrf-sidebar-width) + 16px);top:12px;width:min(520px,calc(100vw - 620px));height:34px;z-index:9;pointer-events:auto}.wrf-home-searchbar.open{display:block}.wrf-home-searchbar input{width:100%;height:100%;border:1px solid #c9cdd4;outline:0;border-radius:7px;padding:0 12px 0 34px;color:#1f2329;background:#fff;box-shadow:0 4px 14px rgba(31,35,41,.08);font-size:13px}.wrf-home-searchbar svg{position:absolute;left:10px;top:8px;color:#8f959e}\n@media(max-width:1100px){.wrf-home-inner{width:min(calc(100% - 28px),980px)}.wrf-quick-actions{grid-template-columns:1fr;max-width:none}.wrf-home-searchbar{width:calc(100vw - 190px)}}\n";
 	//#endregion
 	//#region src/styles/reader.css?inline
-	var reader_default = ".wrf-reader-shell .wrf-topbar{left:var(--wrf-sidebar-width)}.wrf-reader-main{position:absolute;top:58px;left:var(--wrf-sidebar-width);right:0;bottom:0;overflow:auto;background:#fff;pointer-events:auto;z-index:3;transition:left .16s ease}.wrf-reader-main.with-outline{left:calc(var(--wrf-sidebar-width) + 220px)}\n.wrf-article{width:min(760px,calc(100% - 96px));margin:0 auto;padding:54px 0 160px;color:#1f2329;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",\"PingFang SC\",\"Microsoft YaHei\",sans-serif}.wrf-article-title{margin:0;color:#1f2329;font-size:32px;line-height:1.32;font-weight:700;letter-spacing:-.02em}.wrf-article-meta{display:flex;align-items:center;gap:12px;margin:14px 0 24px;color:#8f959e;font-size:12px}.wrf-article-divider{height:1px;background:#f0f1f2;margin:0 0 28px}.wrf-article-body{font-size:16px;line-height:1.78;color:#1f2329}.wrf-md-p{margin:0 0 13px;white-space:pre-wrap;word-break:break-word}.wrf-md-h2{margin:34px 0 14px;font-size:23px;line-height:1.4;font-weight:700;letter-spacing:-.01em}.wrf-md-h3{margin:28px 0 12px;font-size:18px;line-height:1.45;font-weight:650}.wrf-md-quote{margin:16px 0;padding:2px 0 2px 13px;border-left:3px solid #c9cdd4;color:#646a73}.wrf-md-code{margin:16px 0;padding:14px 16px;border:1px solid #e5e6eb;border-radius:6px;background:#f5f6f7;color:#1f2329;font:13px/1.65 \"SFMono-Regular\",Consolas,\"Liberation Mono\",monospace;white-space:pre-wrap;overflow-wrap:anywhere}.wrf-article-loading{padding:40px 0;color:#8f959e;font-size:13px;line-height:1.8}\n@media(max-width:1100px){.wrf-article{width:min(760px,calc(100% - 44px));padding-top:38px}.wrf-reader-main.with-outline{left:calc(var(--wrf-sidebar-width) + 220px)}}\n";
+	var reader_default = ".wrf-reader-shell .wrf-topbar{left:var(--wrf-sidebar-width)}.wrf-reader-main{position:absolute;top:58px;left:var(--wrf-sidebar-width);right:0;bottom:0;overflow:auto;background:#fff;pointer-events:auto;z-index:3;transition:left .16s ease}.wrf-reader-main.with-outline{left:calc(var(--wrf-sidebar-width) + 220px)}\n.wrf-article{width:min(760px,calc(100% - 96px));margin:0 auto;padding:54px 0 160px;color:#1f2329;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",\"PingFang SC\",\"Microsoft YaHei\",sans-serif}.wrf-article-title{margin:0;color:#1f2329;font-size:32px;line-height:1.32;font-weight:700;letter-spacing:-.02em}.wrf-article-meta{display:flex;align-items:center;gap:12px;margin:14px 0 24px;color:#8f959e;font-size:12px}.wrf-article-divider{height:1px;background:#f0f1f2;margin:0 0 28px}.wrf-article-body{font-size:16px;line-height:1.78;color:#1f2329}.wrf-md-p{margin:0 0 13px;white-space:pre-wrap;word-break:break-word}.wrf-md-h2{margin:34px 0 14px;font-size:23px;line-height:1.4;font-weight:700;letter-spacing:-.01em}.wrf-md-h3{margin:28px 0 12px;font-size:18px;line-height:1.45;font-weight:650}.wrf-md-quote{margin:16px 0;padding:2px 0 2px 13px;border-left:3px solid #c9cdd4;color:#646a73}.wrf-md-code{margin:16px 0;padding:14px 16px;border:1px solid #e5e6eb;border-radius:6px;background:#f5f6f7;color:#1f2329;font:13px/1.65 \"SFMono-Regular\",Consolas,\"Liberation Mono\",monospace;white-space:pre-wrap;overflow-wrap:anywhere}.wrf-article-loading{padding:40px 0;color:#8f959e;font-size:13px;line-height:1.8}\n.wrf-article-load-hint{margin:-10px 0 24px;color:#8f959e;font-size:12px;line-height:1.6}.wrf-article-load-status{margin-top:28px;padding:14px 16px;border-top:1px solid #f0f1f2;color:#8f959e;font-size:13px;line-height:1.6;text-align:center}.wrf-article-load-status[data-updated]{color:#3370ff}\n@media(max-width:1100px){.wrf-article{width:min(760px,calc(100% - 44px));padding-top:38px}.wrf-reader-main.with-outline{left:calc(var(--wrf-sidebar-width) + 220px)}}\n";
 	//#endregion
 	//#region src/styles/toc.css?inline
 	var toc_default = ".wrf-toc-toggle{position:absolute;left:calc(var(--wrf-sidebar-width) + 10px);top:74px;width:34px;height:34px;border:0;border-radius:7px;background:#fff;color:#3370ff;display:grid;place-items:center;cursor:pointer;pointer-events:auto;z-index:8;box-shadow:0 3px 12px rgba(31,35,41,.10);transition:left .16s ease}.wrf-toc-toggle.open{left:calc(var(--wrf-sidebar-width) + 228px)}.wrf-toc-toggle:hover{background:#f5f7ff}.wrf-toc-toggle::after{content:attr(data-tooltip);position:absolute;left:0;top:-36px;padding:7px 10px;border-radius:6px;background:#1f2329;color:#fff;font-size:12px;line-height:1;white-space:nowrap;opacity:0;transform:translateY(4px);pointer-events:none;transition:opacity .12s ease,transform .12s ease}.wrf-toc-toggle:hover::after{opacity:1;transform:translateY(0)}\n.wrf-reader-outline{position:absolute;top:58px;left:var(--wrf-sidebar-width);bottom:0;width:220px;background:#fff;border-right:1px solid #eceef1;pointer-events:auto;overflow:auto;z-index:4;padding:12px 8px 24px;transition:transform .16s ease,opacity .16s ease}.wrf-reader-outline.hidden{transform:translateX(-100%);opacity:0;pointer-events:none}.wrf-outline-title{padding:4px 10px 8px;color:#8f959e;font-size:12px;font-weight:500}.wrf-outline-row{width:100%;min-height:31px;border-radius:5px;display:flex;align-items:flex-start;padding-left:calc(6px + var(--wrf-toc-level,0)*16px);transition:background .12s ease}.wrf-outline-row:hover{background:#f5f6f7}.wrf-outline-row.active{background:#eef3ff}.wrf-outline-fold{width:18px;height:31px;flex:0 0 18px;border:0;padding:0;background:transparent;color:#8f959e;display:grid;place-items:center;cursor:pointer}.wrf-outline-fold svg{width:13px;height:13px;transition:transform .14s ease;transform:rotate(90deg)}.wrf-outline-fold.collapsed svg{transform:rotate(0deg)}.wrf-outline-fold.placeholder{visibility:hidden;pointer-events:none}.wrf-outline-fold:hover{color:#3370ff}.wrf-outline-item{min-width:0;flex:1;min-height:31px;border:0;background:transparent;color:#646a73;display:block;padding:6px 8px 5px 2px;text-align:left;cursor:pointer;font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis}.wrf-outline-row[data-level=\"0\"] .wrf-outline-item{color:#3f4752;font-weight:600}.wrf-outline-row[data-level=\"1\"] .wrf-outline-item{color:#59636f;font-weight:500}.wrf-outline-row[data-level=\"2\"] .wrf-outline-item,.wrf-outline-row[data-level=\"3\"] .wrf-outline-item,.wrf-outline-row[data-level=\"4\"] .wrf-outline-item{color:#7a838d;font-size:11.5px}.wrf-outline-row.active .wrf-outline-item{color:#245bdb;font-weight:600}.wrf-outline-row.locked{opacity:.62}.wrf-outline-row.locked:hover{background:transparent}.wrf-outline-row.locked .wrf-outline-item{color:#8f959e!important;cursor:not-allowed}.wrf-outline-row.locked .wrf-outline-item:disabled{opacity:1}.wrf-outline-lock{width:22px;height:31px;flex:0 0 22px;color:#8f959e;display:grid;place-items:center}.wrf-outline-lock svg{width:13px;height:13px}.wrf-outline-empty{padding:14px 10px;color:#8f959e;font-size:12px;line-height:1.6}\n";
@@ -1550,10 +1552,32 @@
 	}
 	//#endregion
 	//#region src/pages/reader.ts
+	var readerLoadNoticeTimer = 0;
+	function refreshReaderLoadStatus(contentAdded = false) {
+		const main = state.root?.querySelector("[data-reader-main]");
+		const status = state.root?.querySelector("[data-reader-load-status]");
+		if (!(main instanceof HTMLElement) || !(status instanceof HTMLElement)) return;
+		status.hidden = !state.readerArticleSignature;
+		if (status.hidden) return;
+		if (contentAdded) {
+			window.clearTimeout(readerLoadNoticeTimer);
+			status.dataset.updated = "true";
+			readerLoadNoticeTimer = window.setTimeout(() => {
+				if (!status.isConnected) return;
+				delete status.dataset.updated;
+				refreshReaderLoadStatus();
+			}, 2200);
+		}
+		const nearBottom = main.scrollHeight - main.clientHeight - main.scrollTop <= 180;
+		const message = status.dataset.updated ? "已补充正文，请继续阅读" : nearBottom ? "继续滚动以加载后续内容" : "正文按阅读进度加载";
+		if (status.textContent !== message) status.textContent = message;
+	}
 	function renderReader(version) {
+		window.clearTimeout(readerLoadNoticeTimer);
 		clearNativeTocHitTargets();
 		const meta = getReaderMeta();
 		const blocks = getReaderBlocks();
+		state.readerArticleSignature = blocks.map((block) => `${block.type}:${block.text}`).join("|");
 		if (state.readerTocItems.length) ensureActiveTocAncestorsExpanded(state.readerTocItems, meta);
 		const activeIndex = findActiveTocIndex(state.readerTocItems, meta);
 		setShellHtml(readerViewHtml({
@@ -1566,6 +1590,8 @@
 			pinnedBooks: state.pinnedBooks,
 			version
 		}));
+		state.root?.querySelector("[data-reader-main]")?.addEventListener("scroll", () => refreshReaderLoadStatus(), { passive: true });
+		refreshReaderLoadStatus();
 		queueMicrotask(() => {
 			syncNativeTocHitTargets();
 		});
@@ -1604,11 +1630,13 @@
 		const blocks = getReaderBlocks();
 		const signature = blocks.map((block) => `${block.type}:${block.text}`).join("|");
 		if (!signature || signature === state.readerArticleSignature) return;
+		const contentAdded = Boolean(state.readerArticleSignature) && blocks.reduce((length, block) => length + block.text.length, 0) > (body.textContent?.length || 0);
 		state.readerArticleSignature = signature;
 		const main = state.root.querySelector("[data-reader-main]");
 		const scrollTop = main instanceof HTMLElement ? main.scrollTop : 0;
 		body.innerHTML = readerBlocksHtml(blocks);
 		if (main instanceof HTMLElement) main.scrollTop = scrollTop;
+		refreshReaderLoadStatus(contentAdded);
 	}
 	//#endregion
 	//#region src/core/route.ts
@@ -1957,7 +1985,7 @@
 	}
 	//#endregion
 	//#region version.ts
-	var VERSION = "0.5.8";
+	var VERSION = "0.5.9";
 	//#endregion
 	//#region src/main.ts
 	if (pageWindow.top !== pageWindow) {} else if (alreadyRunning) console.info("[wr-feishu-ui] duplicate instance ignored");

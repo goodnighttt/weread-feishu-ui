@@ -13,10 +13,36 @@ import {
 import { readerViewHtml } from '../ui/reader-view';
 import { setShellHtml } from '../ui/shell';
 
+let readerLoadNoticeTimer = 0;
+
+function refreshReaderLoadStatus(contentAdded = false): void {
+  const main = state.root?.querySelector('[data-reader-main]');
+  const status = state.root?.querySelector('[data-reader-load-status]');
+  if (!(main instanceof HTMLElement) || !(status instanceof HTMLElement)) return;
+  status.hidden = !state.readerArticleSignature;
+  if (status.hidden) return;
+  if (contentAdded) {
+    window.clearTimeout(readerLoadNoticeTimer);
+    status.dataset.updated = 'true';
+    readerLoadNoticeTimer = window.setTimeout(() => {
+      if (!status.isConnected) return;
+      delete status.dataset.updated;
+      refreshReaderLoadStatus();
+    }, 2200);
+  }
+  const nearBottom = main.scrollHeight - main.clientHeight - main.scrollTop <= 180;
+  const message = status.dataset.updated
+    ? '已补充正文，请继续阅读'
+    : nearBottom ? '继续滚动以加载后续内容' : '正文按阅读进度加载';
+  if (status.textContent !== message) status.textContent = message;
+}
+
 export function renderReader(version: string): void {
+  window.clearTimeout(readerLoadNoticeTimer);
   clearNativeTocHitTargets();
   const meta = getReaderMeta();
   const blocks = getReaderBlocks();
+  state.readerArticleSignature = blocks.map((block) => `${block.type}:${block.text}`).join('|');
   if (state.readerTocItems.length) ensureActiveTocAncestorsExpanded(state.readerTocItems, meta);
   const activeIndex = findActiveTocIndex(state.readerTocItems, meta);
   setShellHtml(readerViewHtml({
@@ -29,6 +55,8 @@ export function renderReader(version: string): void {
     pinnedBooks: state.pinnedBooks,
     version,
   }));
+  state.root?.querySelector('[data-reader-main]')?.addEventListener('scroll', () => refreshReaderLoadStatus(), { passive: true });
+  refreshReaderLoadStatus();
   // Keep the original WeRead rows as transparent hit targets so clicks retain
   // the browser's trusted event and Vue performs the real navigation.
   queueMicrotask(() => { syncNativeTocHitTargets(); });
@@ -74,9 +102,12 @@ export function refreshReaderArticle(): void {
   const blocks = getReaderBlocks();
   const signature = blocks.map((block) => `${block.type}:${block.text}`).join('|');
   if (!signature || signature === state.readerArticleSignature) return;
+  const contentAdded = Boolean(state.readerArticleSignature)
+    && blocks.reduce((length, block) => length + block.text.length, 0) > (body.textContent?.length || 0);
   state.readerArticleSignature = signature;
   const main = state.root.querySelector('[data-reader-main]');
   const scrollTop = main instanceof HTMLElement ? main.scrollTop : 0;
   body.innerHTML = readerBlocksHtml(blocks);
   if (main instanceof HTMLElement) main.scrollTop = scrollTop;
+  refreshReaderLoadStatus(contentAdded);
 }

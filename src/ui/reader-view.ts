@@ -65,8 +65,10 @@ export function readerViewHtml(args: {
         <article class="wrf-article">
           <h1 class="wrf-article-title">${escapeHtml(meta.chapter)}</h1>
           <div class="wrf-article-meta"><span>${escapeHtml(meta.author)}</span><span>·</span><span>${escapeHtml(meta.book)}</span></div>
+          <p class="wrf-article-load-hint">正文按阅读进度加载，向下滚动可继续加载。</p>
           <div class="wrf-article-divider"></div>
           <div class="wrf-article-body" data-reader-body>${readerBlocksHtml(blocks)}</div>
+          <div class="wrf-article-load-status" data-reader-load-status role="status" aria-live="polite" aria-atomic="true" ${blocks.length ? '' : 'hidden'}>正文按阅读进度加载</div>
         </article>
       </main>
     </div>`;
