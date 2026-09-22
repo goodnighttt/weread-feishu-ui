@@ -52,21 +52,9 @@ async function shareCurrentPage(): Promise<void> {
 
 function afterRender(version: string): void {
   if (!state.root || state.page !== 'reader' || !state.enabled) return;
-  const readerMain = state.root.querySelector('[data-reader-main]');
-  if (!(readerMain instanceof HTMLElement) || readerMain.dataset.wrfScrollBound === '1') return;
-  readerMain.dataset.wrfScrollBound = '1';
-  let syncing = false;
-  readerMain.addEventListener('scroll', () => {
-    if (syncing) return;
-    syncing = true;
-    requestAnimationFrame(() => {
-      const overlayMax = Math.max(1, readerMain.scrollHeight - readerMain.clientHeight);
-      const nativeMax = Math.max(0, document.documentElement.scrollHeight - innerHeight);
-      if (nativeMax > 0) window.scrollTo(0, (readerMain.scrollTop / overlayMax) * nativeMax);
-      syncing = false;
-    });
-  }, { passive: true });
-  // Keep active TOC visible after the new reader DOM is mounted.
+  // 暂停“飞书正文滚动 -> 原生页面 window.scrollTo”同步。
+  // 微信读书会根据原生滚动位置虚拟化/分页正文，这会让正文 DOM 在刷新时短暂消失，
+  // 从而造成 DOM 坐标提取与 Canvas 兜底来回切换。目录自身的滚动定位仍然保留。
   if (state.readerTocOpen) scrollReaderTocToActive();
   void version;
 }
